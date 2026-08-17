@@ -44,18 +44,18 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 OUTPUT_DIR = "/home/jlee629/kpmoseq/projects/feb_may"
 
 # List of session folders to process (each must contain optimized.h5)
-# SESSION_DIRS = [
-#     "/media/jlee629/D/MarmoPose/projects/pair-02_13_s1_v1/points_3d",
-#     "/media/jlee629/D/MarmoPose/projects/pair-02_13_s3_v1/points_3d",
-#     "/media/jlee629/D/MarmoPose/projects/pair-02_16_s1_v1/points_3d",
-#     "/media/jlee629/D/MarmoPose/projects/pair-05_06_s2_v2/points_3d",
-#     "/media/jlee629/D/MarmoPose/projects/pair-05_11_s1_v2/points_3d",
-#     # Add more session folders here
-# ]
-
 SESSION_DIRS = [
-    "/media/jlee629/D/MarmoPose/projects/pair-02_13_s1_v1/points_3d"
+    "/media/jlee629/D/MarmoPose/projects/pair-02_13_s1_v1/points_3d",
+    "/media/jlee629/D/MarmoPose/projects/pair-02_13_s3_v1/points_3d",
+    "/media/jlee629/D/MarmoPose/projects/pair-02_16_s1_v1/points_3d",
+    "/media/jlee629/D/MarmoPose/projects/pair-05_06_s2_v2/points_3d",
+    "/media/jlee629/D/MarmoPose/projects/pair-05_11_s1_v2/points_3d",
+    # Add more session folders here
 ]
+
+# SESSION_DIRS = [
+#     "/media/jlee629/D/MarmoPose/projects/pair-02_13_s1_v1/points_3d"
+# ]
 
 BODYPARTS = [
     'head', 'leftear', 'rightear', 'neck',
@@ -79,7 +79,7 @@ ISOLATED_NAN_MIN    = 10    # min NaN frames on each side to trigger removal
 INTERP_MAX_GAP      = 2     # max consecutive NaN frames to interpolate
 OUTLIER_PERCENTILE  = 99    # percentile threshold for centroid-distance outlier removal
 N_BOUNDARY_FRAMES   = 5     # NaN frames inserted at session boundaries
-
+SMOOTH_WINDOW       = 5     # median smoothing window size (frames), must be odd
 
 #%%
 # =============================================================================
@@ -259,6 +259,33 @@ def interpolate_short_gaps(arr: np.ndarray,
 
     return arr
 
+def median_smooth(arr: np.ndarray, window: int = SMOOTH_WINDOW) -> np.ndarray:
+    """
+    Per-keypoint, per-axis: apply a sliding nanmedian filter.
+    Edges are padded with NaN (no reflection or repetition).
+
+    Parameters
+    ----------
+    arr : np.ndarray, shape (n_frames, n_bodyparts, 3)
+    window : int, must be odd
+
+    Returns
+    -------
+    arr : np.ndarray, same shape
+    """
+    arr = arr.copy()
+    n_frames, n_bp, n_ax = arr.shape
+    pad = window // 2
+
+    for b in range(n_bp):
+        for ax in range(n_ax):
+            signal = arr[:, b, ax]
+            swindow = np.lib.stride_tricks.sliding_window_view(signal, window)
+            smoothed = np.nanmedian(swindow, axis=1)
+            arr[pad:n_frames - pad, b, ax] = smoothed
+
+    return arr
+
 
 # =============================================================================
 # Step 4: Centroid-based outlier removal
@@ -435,6 +462,9 @@ def preprocess_session(session_dir: str) -> dict:
         logger.info(f"  After interpolation: "
                     f"{np.sum(np.isnan(data[:, 0, 0]))} NaN frames")
 
+        # Step 3.5: Median smoothing
+        data = median_smooth(data, window=SMOOTH_WINDOW)
+
         # Step 4: Centroid-based outlier removal
         data, centroid = remove_centroid_outliers(data, percentile=OUTLIER_PERCENTILE)
         logger.info(f"  After outlier removal: "
@@ -479,7 +509,8 @@ for session_dir in SESSION_DIRS:
         for track in TRACKS:
             all_tracks[track].append(session_results[track]['data'])
 
-    # Concatenate all sessions along time axis
+
+# Concatenate all sessions along time axis
 logger.info("========== Concatenating all sessions ==========")
 combined = {}
 for track in TRACKS:
