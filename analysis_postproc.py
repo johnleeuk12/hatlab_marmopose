@@ -22,6 +22,13 @@ import random
 from matplotlib.widgets import Slider
 # from mpl_toolkits.mplot3d import Axes3D
 
+import datashader as ds
+import datashader.transfer_functions as tf
+import colorcet as cc
+import pandas as pd
+from datashader.mpl_ext import dsshow
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +307,7 @@ for t in np.arange(1,len(cent_all)-1):
 model_name = '2026_08_19-10_33_58'
 
 results = load_results(project_dir, model_name)
+syllables_raw = np.concatenate([results[k]['syllable'] for k in sorted(results.keys())])
 
 
 
@@ -322,8 +330,9 @@ ani_ind2 = {
 #%%
 
 
-def transform_coord(data):
+def transform_coord(data,speed):
     data3 = data[ani_ind2['not-nan'],:,:]
+    S = speed[ani_ind2['not-nan'],:]
     T = np.zeros((np.size(data3,axis=0),14*3+1))
     for t in np.arange(np.size(data3,axis=0)):
         if not np.isnan(data3[t,3,:]).any() and not np.isnan(data3[t,9,:]).any():
@@ -345,28 +354,285 @@ def transform_coord(data):
 
 # T  = np.vstack((T1,T2))
 
-T = transform_coord(combined_arr)
+T = transform_coord(combined_arr,S)
 
 # %%
 
-reducer = umap.UMAP(n_neighbors=75,n_components=3,min_dist = 0.1)
+reducer = umap.UMAP(n_neighbors=50,n_components=3,min_dist = 0.1)
 
 embedding = reducer.fit_transform(T,force_all_finite="allow-nan")
 embedding.shape
 
-# from umap.parametric_umap import ParametricUMAP
-# embedder = ParametricUMAP()
-# embedding = embedder.fit_transform(T_new2)
 
 
-fig = plt.figure(figsize=(8, 6))
+# %%
+# Align syllables to not-nan frames used in transform_coord
+# T has shape (len(not-nan frames), n_features)
+not_nan_idx = ani_ind2['not-nan']
+syllables_aligned = syllables_raw[not_nan_idx]
+
+# Remove any remaining NaN rows from T (frames where neck/tailbase was NaN)
+valid_mask = ~np.isnan(T).any(axis=1)
+embedding_valid = embedding[valid_mask]
+syllables_valid = syllables_aligned[valid_mask].astype(int)
+
+# Build dataframe for datashader
+n_syllables = int(syllables_valid.max()) + 1
+
+MAX_SYLLABLE = 25
+syllables_capped = np.where(syllables_valid <= MAX_SYLLABLE, 
+                             syllables_valid.astype(str), 
+                             'other')
+
+categories = [str(i) for i in range(MAX_SYLLABLE + 1)] + ['other']
+
+df = pd.DataFrame({
+    'x': embedding_valid[:, 0],
+    'y': embedding_valid[:, 1],
+    'z': embedding_valid[:, 2],
+    'syllable': pd.Categorical(syllables_capped, categories=categories)
+})
+
+
+color_key = {str(i): cc.glasbey[i] for i in range(MAX_SYLLABLE + 1)}
+color_key['other'] = '#aaaaaa'
+
+
+# --- 2D projections colored by syllable ---
+# fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+# projections = [('x', 'y', 'XY'), ('x', 'z', 'XZ'), ('y', 'z', 'YZ')]
+
+# for ax, (dim1, dim2, title) in zip(axes, projections):
+#     dsshow(
+#         df,
+#         ds.Point(dim1, dim2),
+#         ds.count_cat('syllable'),
+#         color_key=color_key,
+#         ax=ax,
+#         aspect='auto'
+#     )
+#     ax.set_title(f'UMAP {title} — colored by syllable')
+#     ax.set_xlabel(dim1)
+#     ax.set_ylabel(dim2)
+
+# plt.tight_layout()
+# plt.show()
+
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+projections = [('x', 'y', 'XY'), ('x', 'z', 'XZ'), ('y', 'z', 'YZ')]
+
+
+
+# import matplotlib.image as mpimg
+# from io import BytesIO
+# from PIL import Image
+from matplotlib.patches import Patch
+
+
+
+for ax, (dim1, dim2, title) in zip(axes, projections):
+    canvas = ds.Canvas(plot_width=800, plot_height=800)
+    agg = canvas.points(df, dim1, dim2, ds.count_cat('syllable'))
+    img = tf.spread(tf.shade(agg, color_key=color_key), px=1)
+    
+    # Convert datashader image to matplotlib
+    pil_img = img.to_pil()
+    ax.imshow(pil_img, origin='upper', aspect='auto',
+              extent=[df[dim1].min(), df[dim1].max(),
+                      df[dim2].min(), df[dim2].max()])
+    
+    legend_handles = [Patch(color=color_key[str(i)], label=f'syllable {i}') 
+                  for i in range(MAX_SYLLABLE + 1)]
+    legend_handles.append(Patch(color='#aaaaaa', label='other'))
+    
+ax.legend(handles=legend_handles, 
+              bbox_to_anchor=(1.05, 1), 
+              loc='upper left', 
+              fontsize=6,
+              ncol=2)    
+ax.set_title(f'UMAP {title} — colored by syllable')
+ax.set_xlabel(dim1)
+ax.set_ylabel(dim2)
+
+
+
+
+plt.tight_layout()
+plt.show()
+
+# %% plot and view data (no Umap)
+
+
+import matplotlib.gridspec as gridspec
+
+vidx = 'vid_1'
+anid  ='animal_2'
+anid2 = 'animal_1'
+# centering data around spine mid
+# add "if spinemid is nan, then ...
+
+entry = index[1]
+anid  = 'track1'
+anid2 = 'track2'
+
+
+
+start, end = entry[anid2]['start'], entry[anid2]['end']
+newdata2 = combined_arr[start:end+1]
+cent2 = cent_all[start:end+1]
+
+start, end = entry[anid]['start'], entry[anid]['end']
+newdata = combined_arr[start:end+1]
+speed = S[start:end+1]
+syllab = syllables_raw[start:end+1]
+cent = cent_all[start:end+1]
+# newdata2 = data_all[vidx][anid2]['keypoints']
+# newdata = data_all[vidx][anid]['keypoints']
+# emb3 = data_all[vidx][anid]['UMAP']
+
+xtime = np.arange(len(newdata))*0.04
+# for t in np.arange(np.size(newdata,axis = 0)):
+#     for sk in np.arange(len(skeleton2)):
+#         newdata[t,sk,:] = D_3[t,sk,:] # - D_1[t,8,:]
+
+# newdata = newdata[ani_ind['not_nan'],:,:]
+
+# --- 2. Set up the Figure and 3D Axes ---
+fig = plt.figure(figsize=(16, 12))
 # Add 3D axes
-# ax = fig.add_subplot(111, projection='3d')
-plt.scatter(embedding[:, 0],embedding[:, 1])
-# ax.scatter(embedding[:, 0],embedding[:, 1],embedding[:, 2])
+
+gs = gridspec.GridSpec(4, 3, figure=fig)
+
+ax = fig.add_subplot(gs[:, 0:2], projection='3d')
+
+axs = {}
+
+axs[0] = fig.add_subplot(gs[0:2,2], projection='3d')
+
+for f in np.arange(2,4):
+    axs[f] = fig.add_subplot(gs[f, 2])  # row f, column 2
 
 
 
+fig.subplots_adjust(bottom=0.25) # Adjust subplot to make room for the slider
+t = 0
+
+ax_l = 450
+
+ax.set_xlim([-150, ax_l])
+ax.set_ylim([-150, ax_l])
+ax.set_zlim([-300, 500])
+
+# for f in np.arange(3):
+#     axs[f].plot(data_all[vidx]['animal_2']['centroid'][:,f])
+#     axs[f].set_xlim([-50,50])
+    
+
+# sc = axs[0].scatter(emb2[:, 0],emb2[:, 1],c = 'b',alpha = 0.01)
+
+# red_dot, = axs[0].plot(emb3[0, 0], emb3[0, 1], 'ro', markersize=10, zorder=5)
 
 
+axs[2].plot(xtime,np.convolve(speed[:,0],10,mode = 'same')*0.04)
+axs[2].set_xlim([-50*.04,50*.04])
+axs[2].set_ylabel('velocity cm/s')
+axs[2].set_ylim([0,150])
+axs[3].plot(xtime,syllab)
+axs[3].set_xlim([-50*.04,50*.04])
+axs[3].set_ylim([0,25])
+axs[2].set_title('time (s)')
+axs[3].set_ylabel('syllable identity')
 
+
+red_line = axs[3].axvline(x=t, ymin=0, ymax=1,color = 'red')
+lines = {}
+lines2 = {}
+
+# plot skeleton
+# for sk,skc in zip(skeleton2,sk_color):
+for sk in np.arange(len(skeleton2)):
+    lines[sk] = ax.plot3D(newdata[t,skeleton2[sk],0], newdata[t,skeleton2[sk],1], -newdata[t,skeleton2[sk],2], sk_color[sk])
+    lines2[sk] = ax.plot3D(newdata2[t,skeleton2[sk],0], newdata2[t,skeleton2[sk],1], -newdata2[t,skeleton2[sk],2], sk_color[sk],alpha = 0.2)
+  
+
+# ---2.1 Plot centroids and syllables
+
+samp_t = random.sample(range(0,len(newdata)),5000)
+axs[0].scatter3D(cent[samp_t,0],
+             cent[samp_t,1],
+             cent[samp_t,2]) 
+
+axs[0].scatter3D(cent2[samp_t,0],
+             cent2[samp_t,1],
+             cent2[samp_t,2],alpha = 0.2) 
+
+# red_scatter, = ax.plot3D(data_all[vidx][anid]['centroid'][0,0],
+#                           data_all[vidx][anid]['centroid'][0,1],
+#                           data_all[vidx][anid]['centroid'][0,2],'ro', markersize=10, zorder=5)
+ 
+
+# --- 3. Create the Slider Widget ---
+ax_slider = fig.add_axes([0.25, 0.1, 0.65, 0.03]) # [left, bottom, width, height]
+time_slider = Slider(
+    ax=ax_slider,
+    label='Time Step',
+    valmin=0,
+    valmax=np.size(newdata,axis = 0) - 1,   
+    valinit=0,
+    valstep=1.0 # Ensures the slider snaps to integer time steps
+)
+
+
+# Create an array of 5 blue pixels
+c_array = np.tile(np.array([0.0, 0.0, 1.0, 0.01], dtype=np.float32), (np.size(newdata, axis=0), 1))
+
+# --- 4. Define the Update Function and Connect to Slider ---
+def update(val):
+    """Callback function to update the plot data based on slider value."""
+    t = int(time_slider.val)
+    # Update the data of the 3D plot artist
+    for sk in np.arange(len(skeleton2)):
+        lines[sk][0].set_data_3d(newdata[t,skeleton2[sk],0], newdata[t,skeleton2[sk],1], -newdata[t,skeleton2[sk],2])
+        lines2[sk][0].set_data_3d(newdata2[t,skeleton2[sk],0], newdata2[t,skeleton2[sk],1], -newdata2[t,skeleton2[sk],2])
+
+        # lines[sk].set_color(sk_color[sk])
+    
+    # update centroid
+    # red_scatter.set_data_3d([data_all[vidx][anid]['centroid'][t,0]],
+    #                         [data_all[vidx][anid]['centroid'][t,1]],
+    #                         [data_all[vidx][anid]['centroid'][t,2]])
+    
+    # update subplot panels    
+    for f in np.arange(2,4):
+        axs[f].set_xlim([(-50+t)*.04,(50+t)*.04])
+        
+    red_line.set_xdata([t*0.04])
+    # Update the scatter
+    # red_dot.set_data([emb3[t, 0]], [emb3[t, 1]])
+    
+    # update xlabel for syllable names 
+    if syllab[t] == 3:
+        axs[3].set_xlabel('walking')
+    else:
+        axs[3].set_xlabel(str(syllab[t]))
+    # Redraw the figure
+    
+    
+    fig.canvas.draw_idle()
+    
+# Register the update function with the slider's on_changed event
+time_slider.on_changed(update)
+
+def on_key(event):
+    step = 10 if event.key in ('up', 'down') else 1
+    if event.key in ('right', 'up'):
+        time_slider.set_val(min(time_slider.val + step, time_slider.valmax))
+    elif event.key in ('left', 'down'):
+        time_slider.set_val(max(time_slider.val - step, time_slider.valmin))
+
+fig.canvas.mpl_connect('key_press_event', on_key)
+
+
+# --- 5. Display the Plot ---
+plt.show()
