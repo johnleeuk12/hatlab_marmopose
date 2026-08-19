@@ -73,6 +73,10 @@ OPTIMIZED_FNAME     = 'dae_smoothed.h5'
 # output
 PREPROCESSED_FNAME  = 'preprocessed.h5'
 COMBINED_FNAME      = 'combined.h5'
+COMBINED_INDEX_FNAME = 'combined_index.npy'
+CENTROID_FNAME      = 'centroid.h5'
+COMBINED_CENTROID_FNAME = 'combined_centroid.h5'
+
 
 ISOLATED_VALID_MAX  = 2     # max consecutive valid frames to consider "isolated"
 ISOLATED_NAN_MIN    = 10    # min NaN frames on each side to trigger removal
@@ -491,36 +495,82 @@ def preprocess_session(session_dir: str) -> dict:
 
 output_dir = Path(OUTPUT_DIR)
 output_dir.mkdir(parents=True, exist_ok=True)
-all_tracks = {track: [] for track in TRACKS}
+
+all_track_all       = []   # accumulates track_all across sessions for combined.h5
+all_centroid_all    = []
+session_index       = []   # accumulates index entries across sessions
+
+cursor = 0           # tracks current position in combined track_all array
 
 for session_dir in SESSION_DIRS:
-        logger.info(f"========== Session: {session_dir} ==========")
+    logger.info(f"========== Session: {session_dir} ==========")
 
-        session_results = preprocess_session(session_dir)
+    session_results = preprocess_session(session_dir)
 
-        # Save per-session preprocessed file
-        per_session_out = Path(session_dir) / PREPROCESSED_FNAME
-        save_preprocessed_h5(
-            {track: session_results[track]['data'] for track in TRACKS},
-            per_session_out
-        )
+    # Save per-session preprocessed.h5 (track1, track2 separately, unchanged)
+    per_session_out = Path(session_dir) / PREPROCESSED_FNAME
+    save_preprocessed_h5(
+        {track: session_results[track]['data'] for track in TRACKS},
+        per_session_out
+    )
+    # Save per-session centroid
+    per_session_centroid_out = Path(session_dir) / CENTROID_FNAME
+    save_preprocessed_h5(
+        {track: session_results[track]['centroid'] for track in TRACKS},
+        per_session_centroid_out
+    )
+    # Build track_all for this session: concatenate track1 and track2 along time axis
+    # Each track is already padded with N_BOUNDARY_FRAMES on each side
+    # An additional NaN boundary pad is inserted between track1 and track2
+    t1 = session_results['track1']['data']
+    t2 = session_results['track2']['data']
+    sep = np.full((N_BOUNDARY_FRAMES, t1.shape[1], t1.shape[2]), np.nan)
+    track_all_session = np.concatenate([t1, sep, t2], axis=0)
+    
+    
+    c1 = session_results['track1']['centroid']
+    c2 = session_results['track2']['centroid']
+    sep_c = np.full((N_BOUNDARY_FRAMES, 3), np.nan)
+    centroid_all_session = np.concatenate([c1, sep_c, c2], axis=0)
+    all_centroid_all.append(centroid_all_session)
+        
+    
+    # Record start/end indices for each track within the combined track_all array
+    t1_start = cursor + N_BOUNDARY_FRAMES          # skip leading pad
+    t1_end   = cursor + t1.shape[0] - N_BOUNDARY_FRAMES - 1  # skip trailing pad
+    t2_start = cursor + t1.shape[0] + N_BOUNDARY_FRAMES + N_BOUNDARY_FRAMES  # skip sep + pad
+    t2_end   = cursor + track_all_session.shape[0] - N_BOUNDARY_FRAMES - 1
 
-        # Accumulate for combined file
-        for track in TRACKS:
-            all_tracks[track].append(session_results[track]['data'])
+    session_index.append({
+        'session_dir': session_dir,
+        'track1': {'start': t1_start, 'end': t1_end},
+        'track2': {'start': t2_start, 'end': t2_end},
+    })
+
+    all_track_all.append(track_all_session)
+    cursor += track_all_session.shape[0]
+
+    logger.info(f"  track1 frames in combined: {t1_start} -> {t1_end}")
+    logger.info(f"  track2 frames in combined: {t2_start} -> {t2_end}")
+
+# Save combined.h5 with single track_all dataset
+logger.info("========== Saving combined file ==========")
+combined_arr = np.concatenate(all_track_all, axis=0)
+save_preprocessed_h5({'track_all': combined_arr}, output_dir / COMBINED_FNAME)
+logger.info(f"  track_all shape: {combined_arr.shape}")
+
+# save combined centroid
+combined_centroid_arr = np.concatenate(all_centroid_all, axis=0)
+save_preprocessed_h5({'centroid_all': combined_centroid_arr}, output_dir / COMBINED_CENTROID_FNAME)
+logger.info(f"  centroid_all shape: {combined_centroid_arr.shape}")
 
 
-# Concatenate all sessions along time axis
-logger.info("========== Concatenating all sessions ==========")
-combined = {}
-for track in TRACKS:
-        combined[track] = np.concatenate(all_tracks[track], axis=0)
-        logger.info(f"Combined {track} shape: {combined[track].shape}")
-
-combined_out = output_dir / COMBINED_FNAME
-save_preprocessed_h5(combined, combined_out)
-logger.info(f"Done. Combined file saved to {combined_out}")
-
+# Save index as .npy
+# Structure: list of dicts, one per session
+# Each dict: {'session_dir': str, 'track1': {'start': int, 'end': int}, 'track2': {...}}
+np.save(output_dir / COMBINED_INDEX_FNAME, session_index)
+logger.info(f"  Index saved to {output_dir / COMBINED_INDEX_FNAME}")
+logger.info("Done.")
 
 
 
