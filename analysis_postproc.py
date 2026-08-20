@@ -225,6 +225,23 @@ def get_syllable_instances(syllables_raw, combined_arr, fps=25):
     return pd.DataFrame(rows)
 
 
+def get_transition_matrix(inst_df, n_states=100, normalize='bigram'):
+    syl = inst_df['syllable'].values
+    
+    trans_mat = np.zeros((n_states, n_states), dtype=float)
+    np.add.at(trans_mat, (syl[:-1], syl[1:]), 1)
+
+    if normalize == 'bigram':
+        total = trans_mat.sum()
+        if total > 0:
+            trans_mat /= total
+    elif normalize == 'rows':
+        row_sums = trans_mat.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        trans_mat /= row_sums
+
+    return trans_mat
+
 
 # %% Init
 project_dir = "/home/jlee629/kpmoseq/projects/feb_may"
@@ -352,6 +369,7 @@ for s in np.unique(syllables_org):
     
 
 comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
+trans_combined = get_transition_matrix(comp_df, normalize='bigram')
 
 # sns.histplot(data = instances_df['syllable'],stat = 'percent')
 
@@ -871,6 +889,8 @@ cent2    = cent_all[start2:end2+1]
 
 newdata_old  = combined_arr[start:end+1]
 newdata2 = combined_arr[start2:end2+1]
+newdata = newdata_old.copy()
+
 
 for sk in np.arange(16):
     newdata[:,sk,:] = newdata_old[:,sk,:]-cent[:,:]
