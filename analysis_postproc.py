@@ -14,7 +14,7 @@ import os
 import h5py
 import logging
 from pathlib import Path
-# import seaborn as sns
+import seaborn as sns
 import umap
 import random
 # from statsmodels.multivariate.pca import PCA
@@ -198,6 +198,34 @@ def _get_path(project_dir, model_name, path, filename, pathname_for_error_msg="p
     path = os.path.join(project_dir, model_name, filename)
     return path
 
+def get_syllable_instances(syllables_raw, combined_arr, fps=25):
+    nan_mask = np.isnan(combined_arr).any(axis=(1, 2))
+    
+    # Boundaries occur where syllable changes OR where NaN status changes
+    syl_change = np.diff(syllables_raw) != 0
+    nan_change = np.diff(nan_mask.astype(int)) != 0
+    boundaries = np.where(syl_change | nan_change)[0] + 1
+    
+    # Segment start/end indices
+    starts = np.concatenate(([0], boundaries))
+    ends   = np.concatenate((boundaries, [len(syllables_raw)]))
+    
+    rows = []
+    for s, e in zip(starts, ends):
+        # Skip NaN segments
+        if nan_mask[s]:
+            continue
+        duration_frames = e - s
+        rows.append({
+            'syllable':        int(syllables_raw[s]),
+            'start_frame':     s,
+            'duration_frames': duration_frames,
+        })
+    
+    return pd.DataFrame(rows)
+
+
+
 # %% Init
 project_dir = "/home/jlee629/kpmoseq/projects/feb_may"
 fname = 'combined.h5'
@@ -307,9 +335,25 @@ for t in np.arange(1,len(cent_all)-1):
 model_name = '2026_08_19-10_33_58'
 
 results = load_results(project_dir, model_name)
-syllables_raw = np.concatenate([results[k]['syllable'] for k in sorted(results.keys())])
+syllables_org = np.concatenate([results[k]['syllable'] for k in sorted(results.keys())])
 
+# compute_df: get syllable instance frequencies and durations
 
+instances_df = get_syllable_instances(syllables_org, combined_arr, fps=25)
+
+thresh = 0.1
+
+hist, _ = np.histogram(instances_df['syllable'],np.arange(100),density = True )
+
+syllables_raw = syllables_org.copy() 
+for s in np.unique(syllables_org):
+    if hist[s] < 1*1e-3: # 1% frequency threshold, subject to change
+        syllables_raw[np.where(syllables_org == s)] = 99
+    
+
+comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
+
+# sns.histplot(data = instances_df['syllable'],stat = 'percent')
 
 
 # %% transforming coordinates normalizing pose to center and orientation
@@ -418,7 +462,6 @@ color_key['other'] = '#aaaaaa'
 # plt.tight_layout()
 # plt.show()
 
-
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 projections = [('x', 'y', 'XY'), ('x', 'z', 'XZ'), ('y', 'z', 'YZ')]
 
@@ -460,6 +503,164 @@ ax.set_ylabel(dim2)
 
 plt.tight_layout()
 plt.show()
+
+
+# %%
+# =============================================================================
+# 4D syllable centroids: UMAP (x,y,z) + normalized velocity
+# =============================================================================
+
+# Extract velocity for valid frames (last column of T, already speed-aligned)
+velocity_valid = T[valid_mask, -1].reshape(-1, 1)
+
+# Normalize velocity to [0,1] so it's on comparable scale to UMAP dims
+v_min, v_max = np.nanmin(velocity_valid), np.nanmax(velocity_valid)
+velocity_norm = (velocity_valid - v_min) / (v_max - v_min + 1e-8)
+
+# Build 4D embedding: (n_valid_frames, 4)
+embedding_4d = np.concatenate([embedding_valid, velocity_norm*2], axis=1)
+
+# Compute per-syllable centroids and spread in 4D space
+syllable_centroids = {}
+syllable_spread    = {}
+
+for syl in range(n_syllables):
+    mask = syllables_valid == syl
+    if mask.sum() == 0:
+        continue
+    pts = embedding_4d[mask]
+    syllable_centroids[syl] = np.nanmean(pts, axis=0)  # shape (4,)
+    syllable_spread[syl]    = np.nanstd(pts,  axis=0)  # shape (4,)
+
+# Build centroid matrix: shape (n_syllables, 4)
+syl_ids         = sorted(syllable_centroids.keys())
+centroid_matrix = np.stack([syllable_centroids[s] for s in syl_ids], axis=0)
+
+# Pairwise Euclidean distances between syllable centroids
+from scipy.spatial.distance import cdist
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+from scipy.cluster.hierarchy import leaves_list
+
+centroid_dist = cdist(centroid_matrix, centroid_matrix, metric='euclidean')
+
+print(f"Syllable centroids computed for {len(syl_ids)} syllables in 4D space")
+print(f"Centroid matrix shape: {centroid_matrix.shape}")
+
+# =============================================================================
+# Cluster spread summary
+# =============================================================================
+print("\nSyllable spread (std dev) per dimension [UMAP-x, UMAP-y, UMAP-z, velocity]:")
+print(f"{'Syl':>5} {'n_frames':>10} {'std_x':>8} {'std_y':>8} {'std_z':>8} {'std_v':>8}")
+for syl in syl_ids:
+    mask     = syllables_valid == syl
+    n_frames = mask.sum()
+    std      = syllable_spread[syl]
+    print(f"{syl:>5} {n_frames:>10} {std[0]:>8.3f} {std[1]:>8.3f} {std[2]:>8.3f} {std[3]:>8.3f}")
+
+# =============================================================================
+# Hierarchical clustering
+# =============================================================================
+# Condense distance matrix to 1D for linkage
+from scipy.spatial.distance import squareform
+dist_condensed = squareform(centroid_dist, checks=False)
+Z = linkage(dist_condensed, method='ward')
+
+# Optimal leaf ordering for cleaner dendrogram
+ordered_leaves = leaves_list(Z)
+syl_labels     = [str(syl_ids[i]) for i in range(len(syl_ids))]
+
+# =============================================================================
+# Figure: distance heatmap + dendrogram + spread
+# =============================================================================
+fig_sim, axes_sim = plt.subplots(
+    2, 2,
+    figsize=(16, 14),
+    gridspec_kw={'width_ratios': [3, 1], 'height_ratios': [1, 2]}
+)
+fig_sim.suptitle('Syllable similarity analysis (4D: UMAP + velocity)', fontsize=13)
+
+# --- Top left: dendrogram ---
+ax_dend = axes_sim[0, 0]
+dendrogram(
+    Z,
+    labels=syl_labels,
+    ax=ax_dend,
+    color_threshold=0.7 * max(Z[:, 2]),
+    leaf_font_size=9,
+    above_threshold_color='grey'
+)
+ax_dend.set_title('Hierarchical clustering of syllable centroids (Ward)', fontsize=10)
+ax_dend.set_ylabel('Distance', fontsize=9)
+ax_dend.set_xlabel('Syllable', fontsize=9)
+ax_dend.spines['top'].set_visible(False)
+ax_dend.spines['right'].set_visible(False)
+
+# --- Top right: cluster spread heatmap (std per dimension) ---
+ax_spread = axes_sim[0, 1]
+spread_matrix = np.stack([syllable_spread[s] for s in syl_ids], axis=0)  # (n_syl, 4)
+im_spread = ax_spread.imshow(spread_matrix, aspect='auto', cmap='YlOrRd')
+ax_spread.set_xticks(range(4))
+ax_spread.set_xticklabels(['UMAP-x', 'UMAP-y', 'UMAP-z', 'velocity'], fontsize=8, rotation=30)
+ax_spread.set_yticks(range(len(syl_ids)))
+ax_spread.set_yticklabels(syl_labels, fontsize=8)
+ax_spread.set_title('Cluster spread (std dev)', fontsize=10)
+plt.colorbar(im_spread, ax=ax_spread, fraction=0.046, pad=0.04)
+
+# --- Bottom left: distance heatmap (reordered by dendrogram) ---
+ax_heat = axes_sim[1, 0]
+dist_reordered = centroid_dist[np.ix_(ordered_leaves, ordered_leaves)]
+labels_reordered = [syl_labels[i] for i in ordered_leaves]
+
+im_heat = ax_heat.imshow(dist_reordered, aspect='auto', cmap='viridis_r')
+ax_heat.set_xticks(range(len(syl_ids)))
+ax_heat.set_xticklabels(labels_reordered, fontsize=8, rotation=90)
+ax_heat.set_yticks(range(len(syl_ids)))
+ax_heat.set_yticklabels(labels_reordered, fontsize=8)
+ax_heat.set_title('Pairwise centroid distance (reordered by clustering)', fontsize=10)
+plt.colorbar(im_heat, ax=ax_heat, fraction=0.046, pad=0.04)
+
+# Annotate heatmap cells with distance values
+for i in range(len(syl_ids)):
+    for j in range(len(syl_ids)):
+        val = dist_reordered[i, j]
+        ax_heat.text(j, i, f'{val:.1f}',
+                     ha='center', va='center',
+                     fontsize=6,
+                     color='white' if val < dist_reordered.max() * 0.5 else 'black')
+
+# --- Bottom right: n_frames per syllable bar chart ---
+ax_bar = axes_sim[1, 1]
+n_frames_per_syl = [np.sum(syllables_valid == s) for s in syl_ids]
+bars = ax_bar.barh(range(len(syl_ids)), n_frames_per_syl,
+                   color=[cc.glasbey[i] for i in range(len(syl_ids))],
+                   edgecolor='none')
+ax_bar.set_yticks(range(len(syl_ids)))
+ax_bar.set_yticklabels(syl_labels, fontsize=8)
+ax_bar.set_xlabel('n frames', fontsize=9)
+ax_bar.set_title('Frames per syllable', fontsize=10)
+ax_bar.spines['top'].set_visible(False)
+ax_bar.spines['right'].set_visible(False)
+
+plt.tight_layout()
+plt.show()
+
+# =============================================================================
+# Print closest syllable pairs (most similar)
+# =============================================================================
+print("\nClosest syllable pairs by centroid distance:")
+print(f"{'Syl A':>6} {'Syl B':>6} {'Distance':>10}")
+
+# Get upper triangle indices, sorted by distance
+n = len(syl_ids)
+pairs = []
+for i in range(n):
+    for j in range(i + 1, n):
+        pairs.append((syl_ids[i], syl_ids[j], centroid_dist[i, j]))
+
+pairs_sorted = sorted(pairs, key=lambda x: x[2])
+for syl_a, syl_b, dist in pairs_sorted[:10]:
+    print(f"{syl_a:>6} {syl_b:>6} {dist:>10.3f}")
+
 
 # %% plot and view data (no Umap)
 
@@ -635,4 +836,303 @@ fig.canvas.mpl_connect('key_press_event', on_key)
 
 
 # --- 5. Display the Plot ---
+plt.show()
+
+
+# %% plot and view data
+import matplotlib.gridspec as gridspec
+import cv2
+from pathlib import Path
+
+# =============================================================================
+# Config
+# =============================================================================
+SESSION_IDX  = 1        # which session from index to view
+N_CAMS       = 4
+VIDEO_SUFFIX = '2'      # bak-{cam}-{VIDEO_SUFFIX}.mp4
+FPS          = 25       # frames per second
+DT           = 1 / FPS  # seconds per frame
+WINDOW_HALF  = 50       # half-window for velocity/syllable time plots (frames)
+AX_LIM       = 450      # 3D pose axis limit
+BUFFER_HALF  = 150      # frames to buffer on each side of current position
+
+# =============================================================================
+# Load session data
+# =============================================================================
+entry = index[SESSION_IDX]
+anid  = 'track1'
+anid2 = 'track2'
+
+start,  end  = entry[anid]['start'],  entry[anid]['end']
+start2, end2 = entry[anid2]['start'], entry[anid2]['end']
+
+cent     = cent_all[start:end+1]
+cent2    = cent_all[start2:end2+1]
+
+newdata_old  = combined_arr[start:end+1]
+newdata2 = combined_arr[start2:end2+1]
+
+for sk in np.arange(16):
+    newdata[:,sk,:] = newdata_old[:,sk,:]-cent[:,:]
+# fig, axs = plt.subplots(4, 1)
+#     # sc = 3
+# for i in [0,1,2]:
+#         # axs[i].plot(coord[name][:,sc,i],color = 'blue')
+#         # axs[i].plot(D_track_opt[:,sc,i],'green')
+#         axs[i].plot(newdata[:,8,i],'red')
+#         axs[i].plot(cent[:,i],'blue')
+#         # axs[i].plot(time3*800,'black',marker='.', linestyle='None')
+#         # axs[i].set_ylim([-300,700])
+    
+# plt.show
+
+speed    = S[start:end+1]
+syllab   = syllables_raw[start:end+1]
+xtime    = np.arange(len(newdata)) * DT
+
+# =============================================================================
+# Video capture setup — single combined video with rolling buffer
+# =============================================================================
+def open_combined_capture(session_dir):
+    video_path = Path(session_dir).parent / 'videos_labeled_2d' / 'vid_combined.mp4'
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise IOError(f"Could not open video: {video_path}")
+    return cap
+
+
+class FrameBuffer:
+    def __init__(self, cap, half=BUFFER_HALF):
+        self.cap    = cap
+        self.half   = half
+        self.center = -1
+        self.buffer = {}  # frame_num -> np.ndarray
+
+    def _load_range(self, start, end):
+        """Sequentially read frames from start to end into buffer."""
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        for fn in range(start, end + 1):
+            ret, frame = self.cap.read()
+            if ret: 
+                self.buffer[fn] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            else:
+                self.buffer[fn] = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    def get(self, frame_num):
+        """Return frame, refilling buffer if frame_num is outside current window."""
+        if frame_num not in self.buffer:
+            self.buffer.clear()
+            start = max(0, frame_num - self.half)
+            end   = frame_num + self.half
+            self._load_range(start, end)
+            self.center = frame_num
+        return self.buffer[frame_num]
+
+
+cap = open_combined_capture(entry['session_dir'])
+buf = FrameBuffer(cap, half=BUFFER_HALF)
+
+# Pre-load initial buffer
+buf.get(0)
+
+# =============================================================================
+# Figure layout
+# =============================================================================
+#  Col 0 (70%): video — full height left side
+#  Col 1 (30%): 4 stacked panels — 3D pose, centroid, velocity, syllable
+# =============================================================================
+fig = plt.figure(figsize=(22, 12))
+gs  = gridspec.GridSpec(4, 2, figure=fig,
+                        width_ratios=[4, 1],
+                        height_ratios=[1, 1, 0.7, 0.7],
+                        hspace=0.15, wspace=0.1)
+
+# Left: video — spans all 4 rows
+ax_vid = fig.add_subplot(gs[:, 0])
+ax_vid.axis('off')
+ax_vid.set_title('Camera grid', fontsize=9)
+
+# # Right row 0: 3D pose for non centered
+# ax_pose = fig.add_subplot(gs[0:2, 1], projection='3d')
+# ax_pose.set_xlim([-200, 450])
+# ax_pose.set_ylim([-200, 450])
+# ax_pose.set_zlim([-500, 300])
+# ax_pose.set_title('3D pose', fontsize=9)
+
+# Right row 0: 3D pose for centered
+ax_pose = fig.add_subplot(gs[0:2, 1], projection='3d')
+ax_pose.set_xlim([-200, 200])
+ax_pose.set_ylim([-200, 200])
+ax_pose.set_zlim([-200, 200])
+ax_pose.set_title('3D pose', fontsize=9)
+
+
+# Right row 1: centroid scatter
+ax_cent = fig.add_subplot(gs[0:2, 1], projection='3d')
+samp_t  = random.sample(range(0, len(newdata)),  min(5000, len(newdata)))
+samp_t2 = random.sample(range(0, len(newdata2)), min(5000, len(newdata2)))
+ax_cent.scatter3D(cent[samp_t, 0],   cent[samp_t, 1],   cent[samp_t, 2],
+                  s=1, alpha=0.3, label=anid)
+ax_cent.scatter3D(cent2[samp_t2, 0], cent2[samp_t2, 1], cent2[samp_t2, 2],
+                  s=1, alpha=0.1, label=anid2)
+ax_cent.set_title('centroid', fontsize=9)
+ax_cent.set_xlim([-200, 550])
+ax_cent.set_ylim([-200, 550])
+ax_cent.set_zlim([-200, 650])
+ax_cent.legend(fontsize=7)
+ax_cent.set_visible(False)  # hidden by default
+
+# Right row 2: velocity
+ax_vel = fig.add_subplot(gs[2, 1])
+ax_vel.plot(xtime, np.convolve(speed[:, 0], 10, mode='same') * DT, lw=0.8)
+ax_vel.set_ylabel('velocity (cm/s)', fontsize=8)
+ax_vel.set_ylim([0, 50])
+ax_vel.set_title('time (s)', fontsize=8)
+
+# Right row 3: syllable
+ax_syl = fig.add_subplot(gs[3, 1])
+ax_syl.plot(xtime, syllab, lw=0.8)
+ax_syl.set_ylabel('syllable', fontsize=8)
+ax_syl.set_ylim([0, 25])
+
+fig.subplots_adjust(bottom=0.12, left=0.02, right=0.97, top=0.95)
+
+#==============================================================================
+#Toggle button
+
+# Toggle buttons for pose / centroid
+ax_btn_pose = fig.add_axes([0.75, 0.91, 0.1, 0.03])
+ax_btn_cent = fig.add_axes([0.85, 0.91, 0.1, 0.03])
+
+from matplotlib.widgets import Button
+btn_pose = Button(ax_btn_pose, 'Pose',     color='steelblue', hovercolor='lightblue')
+btn_cent = Button(ax_btn_cent, 'Centroid', color='lightgrey', hovercolor='lightblue')
+
+def show_pose(event):
+    ax_pose.set_visible(True)
+    ax_cent.set_visible(False)
+    btn_pose.color = 'steelblue'
+    btn_cent.color = 'lightgrey'
+    fig.canvas.draw_idle()
+
+def show_cent(event):
+    ax_pose.set_visible(False)
+    ax_cent.set_visible(True)
+    btn_pose.color = 'lightgrey'
+    btn_cent.color = 'steelblue'
+    fig.canvas.draw_idle()
+
+btn_pose.on_clicked(show_pose)
+btn_cent.on_clicked(show_cent)
+
+# =============================================================================
+# Initial frame render
+# =============================================================================
+t0 = 0
+
+# Video
+init_frame = buf.get(t0)
+vid_im = ax_vid.imshow(init_frame, aspect='auto')
+
+# Skeleton lines
+lines  = {}
+lines2 = {}
+for sk in range(len(skeleton2)):
+    lines[sk]  = ax_pose.plot3D(
+        newdata[t0, skeleton2[sk], 0],
+        newdata[t0, skeleton2[sk], 1],
+        -newdata[t0, skeleton2[sk], 2],
+        sk_color[sk]
+    )
+    lines2[sk] = ax_pose.plot3D(
+        newdata2[t0, skeleton2[sk], 0],
+        newdata2[t0, skeleton2[sk], 1],
+        -newdata2[t0, skeleton2[sk], 2],
+        sk_color[sk], alpha=0.2
+    )
+
+# Red vertical time lines
+red_line_vel = ax_vel.axvline(x=t0 * DT, color='red', lw=1)
+red_line_syl = ax_syl.axvline(x=t0 * DT, color='red', lw=1)
+
+# Initial time window
+ax_vel.set_xlim([-WINDOW_HALF * DT, WINDOW_HALF * DT])
+ax_syl.set_xlim([-WINDOW_HALF * DT, WINDOW_HALF * DT])
+
+# =============================================================================
+# Slider
+# =============================================================================
+ax_slider = fig.add_axes([0.05, 0.04, 0.9, 0.02])
+time_slider = Slider(
+    ax=ax_slider,
+    label='Frame',
+    valmin=0,
+    valmax=len(newdata) - 1,
+    valinit=0,
+    valstep=1.0
+)
+
+# =============================================================================
+# Update function
+# =============================================================================
+def update(val):
+    t = int(time_slider.val)
+
+    # --- Update video ---
+    frame = buf.get(t)
+    vid_im.set_data(frame)
+
+    # --- Update 3D skeleton ---
+    for sk in range(len(skeleton2)):
+        lines[sk][0].set_data_3d(
+            newdata[t, skeleton2[sk], 0],
+            newdata[t, skeleton2[sk], 1],
+            -newdata[t, skeleton2[sk], 2]
+        )
+        lines2[sk][0].set_data_3d(
+            newdata2[t, skeleton2[sk], 0],
+            newdata2[t, skeleton2[sk], 1],
+            -newdata2[t, skeleton2[sk], 2]
+        )
+
+    # --- Update time window ---
+    t_sec = t * DT
+    ax_vel.set_xlim([(t - WINDOW_HALF) * DT, (t + WINDOW_HALF) * DT])
+    ax_syl.set_xlim([(t - WINDOW_HALF) * DT, (t + WINDOW_HALF) * DT])
+    red_line_vel.set_xdata([t_sec])
+    red_line_syl.set_xdata([t_sec])
+
+    # --- Update syllable label ---
+    syl_id = int(syllab[t]) if not np.isnan(syllab[t]) else -1
+    label_map = {3: 'walking'}  # add known syllable->behavior mappings here
+    ax_syl.set_xlabel(label_map.get(syl_id, str(syl_id)), fontsize=8)
+
+    fig.canvas.draw_idle()
+
+
+time_slider.on_changed(update)
+
+# =============================================================================
+# Keyboard navigation
+# =============================================================================
+def on_key(event):
+    step = 10 if event.key in ('up', 'down') else 1
+    if event.key in ('right', 'up'):
+        time_slider.set_val(min(time_slider.val + step, time_slider.valmax))
+    elif event.key in ('left', 'down'):
+        time_slider.set_val(max(time_slider.val - step, time_slider.valmin))
+
+fig.canvas.mpl_connect('key_press_event', on_key)
+
+# =============================================================================
+# Cleanup on close
+# =============================================================================
+def on_close(event):
+    cap.release()
+
+fig.canvas.mpl_connect('close_event', on_close)
+
+# =============================================================================
+# Show
+# =============================================================================
 plt.show()
