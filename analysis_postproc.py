@@ -21,7 +21,7 @@ import random
 # import keypoint_moseq as kpms
 from matplotlib.widgets import Slider
 # from mpl_toolkits.mplot3d import Axes3D
-
+import networkx as nx
 import datashader as ds
 import datashader.transfer_functions as tf
 import colorcet as cc
@@ -198,32 +198,68 @@ def _get_path(project_dir, model_name, path, filename, pathname_for_error_msg="p
     path = os.path.join(project_dir, model_name, filename)
     return path
 
-def get_syllable_instances(syllables_raw, combined_arr, fps=25):
+def get_syllable_instances(syllables_raw, combined_arr, fps=25, min_duration=3):
+    syl = np.asarray(syllables_raw)
     nan_mask = np.isnan(combined_arr).any(axis=(1, 2))
-    
-    # Boundaries occur where syllable changes OR where NaN status changes
-    syl_change = np.diff(syllables_raw) != 0
-    nan_change = np.diff(nan_mask.astype(int)) != 0
-    boundaries = np.where(syl_change | nan_change)[0] + 1
-    
-    # Segment start/end indices
-    starts = np.concatenate(([0], boundaries))
-    ends   = np.concatenate((boundaries, [len(syllables_raw)]))
-    
-    rows = []
-    for s, e in zip(starts, ends):
-        # Skip NaN segments
-        if nan_mask[s]:
-            continue
-        duration_frames = e - s
-        rows.append({
-            'syllable':        int(syllables_raw[s]),
-            'start_frame':     s,
-            'duration_frames': duration_frames,
-        })
-    
-    return pd.DataFrame(rows)
+    n = len(syl)
 
+    cols = ['syllable', 'start_frame', 'duration_frames']
+    if n == 0:
+        return pd.DataFrame(columns=cols)
+
+    # --- Initial segmentation: split on label change or NaN-status change ---
+    change = (np.diff(syl) != 0) | (np.diff(nan_mask.astype(int)) != 0)
+    bounds = np.where(change)[0] + 1
+    starts = np.concatenate(([0], bounds))
+    ends   = np.concatenate((bounds, [n]))
+
+    runs = [{'start': int(s), 'end': int(e), 'label': int(syl[s]),
+             'is_nan': bool(nan_mask[s]), 'dropped': False}
+            for s, e in zip(starts, ends)]
+
+    # --- Absorb short runs, left to right so relabelling cascades ---
+    n_prev = n_next = n_drop = 0
+    for i, r in enumerate(runs):
+        if r['is_nan'] or (r['end'] - r['start']) >= min_duration:
+            continue
+
+        prev = runs[i - 1] if i > 0 else None
+        nxt  = runs[i + 1] if i + 1 < len(runs) else None
+
+        prev_ok = prev is not None and not prev['is_nan'] and not prev['dropped']
+        next_ok = nxt  is not None and not nxt['is_nan']
+
+        if prev_ok:
+            r['label'] = prev['label']
+            n_prev += 1
+        elif next_ok:
+            r['label'] = nxt['label']
+            n_next += 1
+        else:
+            r['dropped'] = True
+            n_drop += 1
+
+    # --- Emit, merging runs that now share a label and stay frame-adjacent ---
+    rows = []
+    for r in runs:
+        if r['is_nan'] or r['dropped']:
+            continue
+        if rows and rows[-1]['syllable'] == r['label'] \
+                and rows[-1]['start_frame'] + rows[-1]['duration_frames'] == r['start']:
+            rows[-1]['duration_frames'] += r['end'] - r['start']
+        else:
+            rows.append({'syllable':        r['label'],
+                         'start_frame':     r['start'],
+                         'duration_frames': r['end'] - r['start']})
+
+    out = pd.DataFrame(rows, columns=cols)
+    out.attrs['n_absorbed_prev'] = n_prev
+    out.attrs['n_absorbed_next'] = n_next
+    out.attrs['n_dropped']       = n_drop
+    # print(f'  short runs (<{min_duration} frames): '
+    #       f'{n_prev} absorbed into preceding, '
+    #       f'{n_next} into following, {n_drop} dropped')
+    return out
 
 def get_transition_matrix(inst_df, n_states=100, normalize='bigram'):
     syl = inst_df['syllable'].values
@@ -367,11 +403,16 @@ for s in np.unique(syllables_org):
     if hist[s] < 1*1e-3: # 1% frequency threshold, subject to change
         syllables_raw[np.where(syllables_org == s)] = 99
     
+# for i in range(1,len(instances_df)):
+#     if instances_df['duration_frames'][i] <3:
+#         syllables_raw[instances_df['start_frame'][i]] = instances_df['syllable'][i-1]
 
 comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
 trans_combined = get_transition_matrix(comp_df, normalize='bigram')
-
+# np.save(os.path.join(project_dir,'comp_df.npy'),comp_df,allow_pickle=True)
+comp_df.to_pickle(os.path.join(project_dir, 'comp_df.pkl'))
 # sns.histplot(data = instances_df['syllable'],stat = 'percent')
+sns.histplot(data = comp_df['duration_frames'],binwidth = 1)
 
 
 # %% transforming coordinates normalizing pose to center and orientation
@@ -528,77 +569,114 @@ plt.show()
 # 4D syllable centroids: UMAP (x,y,z) + normalized velocity
 # =============================================================================
 
-# Extract velocity for valid frames (last column of T, already speed-aligned)
+from scipy.spatial.distance import cdist, squareform
+from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list
+import matplotlib.gridspec as gridspec
+
+# --- Exclude syllable 99 (low-frequency catch-all) ---
+syll_include = sorted([s for s in np.unique(syllables_valid) if s != 99])
+n_syl        = len(syll_include)
+syl_labels   = [str(s) for s in syll_include]
+
+# Color map: consistent color per syllable across all plots
+syl_colors = {s: cc.glasbey[i] for i, s in enumerate(syll_include)}
+
+# --- Extract velocity for valid frames (last column of T) ---
 velocity_valid = T[valid_mask, -1].reshape(-1, 1)
+v_min, v_max   = np.nanmin(velocity_valid), np.nanmax(velocity_valid)
+velocity_norm  = (velocity_valid - v_min) / (v_max - v_min + 1e-8)
 
-# Normalize velocity to [0,1] so it's on comparable scale to UMAP dims
-v_min, v_max = np.nanmin(velocity_valid), np.nanmax(velocity_valid)
-velocity_norm = (velocity_valid - v_min) / (v_max - v_min + 1e-8)
+# --- Build 4D embedding: (n_valid_frames, 4) ---
+embedding_4d = np.concatenate([embedding_valid, velocity_norm * 2], axis=1)
 
-# Build 4D embedding: (n_valid_frames, 4)
-embedding_4d = np.concatenate([embedding_valid, velocity_norm*2], axis=1)
-
-# Compute per-syllable centroids and spread in 4D space
+# --- Per-syllable centroids and spread ---
 syllable_centroids = {}
 syllable_spread    = {}
 
-for syl in range(n_syllables):
+for syl in syll_include:
     mask = syllables_valid == syl
     if mask.sum() == 0:
         continue
     pts = embedding_4d[mask]
-    syllable_centroids[syl] = np.nanmean(pts, axis=0)  # shape (4,)
-    syllable_spread[syl]    = np.nanstd(pts,  axis=0)  # shape (4,)
+    syllable_centroids[syl] = np.nanmean(pts, axis=0)  # (4,)
+    syllable_spread[syl]    = np.nanstd(pts,  axis=0)  # (4,)
 
-# Build centroid matrix: shape (n_syllables, 4)
-syl_ids         = sorted(syllable_centroids.keys())
-centroid_matrix = np.stack([syllable_centroids[s] for s in syl_ids], axis=0)
+centroid_matrix = np.stack([syllable_centroids[s] for s in syll_include], axis=0)
+centroid_dist   = cdist(centroid_matrix, centroid_matrix, metric='euclidean')
 
-# Pairwise Euclidean distances between syllable centroids
-from scipy.spatial.distance import cdist
-from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
-from scipy.cluster.hierarchy import leaves_list
-
-centroid_dist = cdist(centroid_matrix, centroid_matrix, metric='euclidean')
-
-print(f"Syllable centroids computed for {len(syl_ids)} syllables in 4D space")
-print(f"Centroid matrix shape: {centroid_matrix.shape}")
-
-# =============================================================================
-# Cluster spread summary
-# =============================================================================
-print("\nSyllable spread (std dev) per dimension [UMAP-x, UMAP-y, UMAP-z, velocity]:")
-print(f"{'Syl':>5} {'n_frames':>10} {'std_x':>8} {'std_y':>8} {'std_z':>8} {'std_v':>8}")
-for syl in syl_ids:
-    mask     = syllables_valid == syl
-    n_frames = mask.sum()
-    std      = syllable_spread[syl]
-    print(f"{syl:>5} {n_frames:>10} {std[0]:>8.3f} {std[1]:>8.3f} {std[2]:>8.3f} {std[3]:>8.3f}")
-
-# =============================================================================
-# Hierarchical clustering
-# =============================================================================
-# Condense distance matrix to 1D for linkage
-from scipy.spatial.distance import squareform
-dist_condensed = squareform(centroid_dist, checks=False)
-Z = linkage(dist_condensed, method='ward')
-
-# Optimal leaf ordering for cleaner dendrogram
+# --- Hierarchical clustering ---
+Z              = linkage(squareform(centroid_dist, checks=False), method='ward')
 ordered_leaves = leaves_list(Z)
-syl_labels     = [str(syl_ids[i]) for i in range(len(syl_ids))]
+labels_ordered = [syl_labels[i] for i in ordered_leaves]
+dist_reordered = centroid_dist[np.ix_(ordered_leaves, ordered_leaves)]
+syll_ordered   = [syll_include[i] for i in ordered_leaves]
 
-# =============================================================================
-# Figure: distance heatmap + dendrogram + spread
-# =============================================================================
-fig_sim, axes_sim = plt.subplots(
-    2, 2,
-    figsize=(16, 14),
-    gridspec_kw={'width_ratios': [3, 1], 'height_ratios': [1, 2]}
-)
-fig_sim.suptitle('Syllable similarity analysis (4D: UMAP + velocity)', fontsize=13)
+# --- Real syllable instance frequency from comp_df (excludes 99) ---
+freq_counts  = comp_df[comp_df['syllable'] != 99]['syllable'].value_counts()
+freq_total   = freq_counts.sum()
+freq_dict    = {s: freq_counts.get(s, 0) / freq_total for s in syll_include}
 
-# --- Top left: dendrogram ---
-ax_dend = axes_sim[0, 0]
+# --- Transition matrix from comp_df ---
+N_STATES = 100
+
+def get_transition_matrix(inst_df, n_states=N_STATES, normalize='bigram'):
+    syl       = inst_df['syllable'].values
+    trans_mat = np.zeros((n_states, n_states), dtype=float)
+    np.add.at(trans_mat, (syl[:-1], syl[1:]), 1)
+    if normalize == 'bigram':
+        total = trans_mat.sum()
+        if total > 0:
+            trans_mat /= total
+    elif normalize == 'rows':
+        row_sums = trans_mat.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        trans_mat /= row_sums
+    return trans_mat
+
+trans_combined = get_transition_matrix(comp_df[comp_df['syllable'] != 99], normalize='bigram')
+
+# Subset transition matrix to syll_include only
+syl_idx        = np.array(syll_include)
+trans_sub      = trans_combined[np.ix_(syl_idx, syl_idx)]
+trans_reordered = trans_sub[np.ix_(ordered_leaves, ordered_leaves)]
+
+# # Per-session transition matrices
+# trans_per_session = {}
+# for i, entry in enumerate(index):
+#     sess_start = entry['track1']['start']
+#     sess_end   = entry['track2']['end']
+#     sess_df    = comp_df[
+#         (comp_df['start_frame'] >= sess_start) &
+#         (comp_df['start_frame'] <= sess_end)  &
+#         (comp_df['syllable']    != 99)
+#     ].reset_index(drop=True)
+#     trans_per_session[f'session{i}'] = get_transition_matrix(sess_df, normalize='bigram')
+#     print(f"session{i}: {len(sess_df)} instances")
+
+# Cluster transition matrix independently
+# Use row+col profiles as fingerprint for each syllable
+trans_sym      = (trans_sub + trans_sub.T) / 2
+Z_trans        = linkage(squareform(cdist(trans_sym, trans_sym, metric='euclidean'), 
+                                    checks=False), method='ward')
+ordered_leaves2 = leaves_list(Z_trans)
+labels_ordered2 = [syl_labels[i] for i in ordered_leaves2]
+trans_reordered2 = trans_sub[np.ix_(ordered_leaves2, ordered_leaves2)]
+
+# %%
+# =============================================================================
+# Figure 1: Dendrogram + Spread + Distance heatmap + Transition heatmap
+# =============================================================================
+
+fig1 = plt.figure(figsize=(24, 14))
+fig1.suptitle('Syllable similarity analysis (4D: UMAP + velocity)', fontsize=13)
+
+gs1 = gridspec.GridSpec(2, 3, figure=fig1,
+                         width_ratios=[2.5, 2.5, 1.5],
+                         height_ratios=[1, 2],
+                         hspace=0.35, wspace=0.4)
+
+# Row 0, Col 0: Dendrogram (unchanged)
+ax_dend = fig1.add_subplot(gs1[0, 0])
 dendrogram(
     Z,
     labels=syl_labels,
@@ -607,77 +685,314 @@ dendrogram(
     leaf_font_size=9,
     above_threshold_color='grey'
 )
-ax_dend.set_title('Hierarchical clustering of syllable centroids (Ward)', fontsize=10)
+ax_dend.set_title('Hierarchical clustering (Ward)', fontsize=10)
 ax_dend.set_ylabel('Distance', fontsize=9)
 ax_dend.set_xlabel('Syllable', fontsize=9)
 ax_dend.spines['top'].set_visible(False)
 ax_dend.spines['right'].set_visible(False)
+ 
+# --- Row 0, Col 1-2: Syllable frequency bar chart ---
+ax_freq = fig1.add_subplot(gs1[0, 1:])
+freq_vals    = [freq_dict[s] for s in syll_include]
+freq_colors  = [syl_colors[s] for s in syll_include]
+ax_freq.bar(range(n_syl), freq_vals, color=freq_colors, edgecolor='none')
+ax_freq.set_xticks(range(n_syl))
+ax_freq.set_xticklabels(syl_labels, fontsize=8, rotation=90)
+ax_freq.set_ylabel('Instance frequency', fontsize=9)
+ax_freq.set_title('Syllable frequency (instance-based, excl. 99)', fontsize=10)
+ax_freq.spines['top'].set_visible(False)
+ax_freq.spines['right'].set_visible(False)
 
-# --- Top right: cluster spread heatmap (std per dimension) ---
-ax_spread = axes_sim[0, 1]
-spread_matrix = np.stack([syllable_spread[s] for s in syl_ids], axis=0)  # (n_syl, 4)
+# Row 1, Col 0: Distance heatmap — reordered by centroid clustering
+ax_heat = fig1.add_subplot(gs1[1, 0])
+im_heat = ax_heat.imshow(dist_reordered, aspect='equal', cmap='viridis_r')
+ax_heat.set_xticks(range(n_syl))
+ax_heat.set_xticklabels(labels_ordered, fontsize=7, rotation=90)
+ax_heat.set_yticks(range(n_syl))
+ax_heat.set_yticklabels(labels_ordered, fontsize=7)
+ax_heat.set_title('Centroid distance\n(ordered by centroid clustering)', fontsize=10)
+plt.colorbar(im_heat, ax=ax_heat, fraction=0.046, pad=0.04)
+
+# Row 1, Col 1: Transition heatmap — reordered by transition clustering
+ax_trans = fig1.add_subplot(gs1[1, 1])
+im_trans = ax_trans.imshow(trans_reordered2, aspect='equal', cmap='hot_r',
+                            vmin=0, vmax=np.percentile(trans_reordered2[trans_reordered2 > 0], 95))
+ax_trans.set_xticks(range(n_syl))
+ax_trans.set_xticklabels(labels_ordered2, fontsize=7, rotation=90)
+ax_trans.set_yticks(range(n_syl))
+ax_trans.set_yticklabels(labels_ordered2, fontsize=7)
+ax_trans.set_title('Transition matrix\n(ordered by transition clustering)', fontsize=10)
+ax_trans.set_xlabel('to', fontsize=8)
+ax_trans.set_ylabel('from', fontsize=8)
+plt.colorbar(im_trans, ax=ax_trans, fraction=0.046, pad=0.04)
+    
+# --- Row 1, Col 2: Cluster spread heatmap ---
+ax_spread = fig1.add_subplot(gs1[1, 2])
+spread_matrix = np.stack([syllable_spread[s] for s in syll_include], axis=0)
 im_spread = ax_spread.imshow(spread_matrix, aspect='auto', cmap='YlOrRd')
 ax_spread.set_xticks(range(4))
 ax_spread.set_xticklabels(['UMAP-x', 'UMAP-y', 'UMAP-z', 'velocity'], fontsize=8, rotation=30)
-ax_spread.set_yticks(range(len(syl_ids)))
+ax_spread.set_yticks(range(n_syl))
 ax_spread.set_yticklabels(syl_labels, fontsize=8)
 ax_spread.set_title('Cluster spread (std dev)', fontsize=10)
 plt.colorbar(im_spread, ax=ax_spread, fraction=0.046, pad=0.04)
 
-# --- Bottom left: distance heatmap (reordered by dendrogram) ---
-ax_heat = axes_sim[1, 0]
-dist_reordered = centroid_dist[np.ix_(ordered_leaves, ordered_leaves)]
-labels_reordered = [syl_labels[i] for i in ordered_leaves]
+plt.show()
 
-im_heat = ax_heat.imshow(dist_reordered, aspect='auto', cmap='viridis_r')
-ax_heat.set_xticks(range(len(syl_ids)))
-ax_heat.set_xticklabels(labels_reordered, fontsize=8, rotation=90)
-ax_heat.set_yticks(range(len(syl_ids)))
-ax_heat.set_yticklabels(labels_reordered, fontsize=8)
-ax_heat.set_title('Pairwise centroid distance (reordered by clustering)', fontsize=10)
-plt.colorbar(im_heat, ax=ax_heat, fraction=0.046, pad=0.04)
 
-# Annotate heatmap cells with distance values
-for i in range(len(syl_ids)):
-    for j in range(len(syl_ids)):
-        val = dist_reordered[i, j]
-        ax_heat.text(j, i, f'{val:.1f}',
-                     ha='center', va='center',
-                     fontsize=6,
-                     color='white' if val < dist_reordered.max() * 0.5 else 'black')
+# %% 
+# =============================================================================
+# Syllable transition graph
+# =============================================================================
 
-# --- Bottom right: n_frames per syllable bar chart ---
-ax_bar = axes_sim[1, 1]
-n_frames_per_syl = [np.sum(syllables_valid == s) for s in syl_ids]
-bars = ax_bar.barh(range(len(syl_ids)), n_frames_per_syl,
-                   color=[cc.glasbey[i] for i in range(len(syl_ids))],
-                   edgecolor='none')
-ax_bar.set_yticks(range(len(syl_ids)))
-ax_bar.set_yticklabels(syl_labels, fontsize=8)
-ax_bar.set_xlabel('n frames', fontsize=9)
-ax_bar.set_title('Frames per syllable', fontsize=10)
-ax_bar.spines['top'].set_visible(False)
-ax_bar.spines['right'].set_visible(False)
+EDGE_THRESH  = 0.002
+NODE_SCALING = 2000
+LAYOUT       = 'circular'  # or 'spring'
+
+# Build graph directly from subsetted transition matrix
+trans_plot = trans_sub * 100
+G          = nx.from_numpy_array(trans_plot)
+
+# Relabel nodes from 0..n_syl to actual syllable numbers
+mapping = {i: syll_include[i] for i in range(n_syl)}
+G       = nx.relabel_nodes(G, mapping)
+
+# Remove weak edges
+weak_edges = [(u, v) for u, v, d in G.edges(data=True) if d['weight'] < EDGE_THRESH * 100]
+G.remove_edges_from(weak_edges)
+
+# Layout
+pos = nx.circular_layout(G) if LAYOUT == 'circular' else nx.spring_layout(G, seed=42)
+
+# Node sizes proportional to frequency
+node_sizes = [freq_dict[s] * NODE_SCALING + 1000 for s in G.nodes()]
+
+widths = nx.get_edge_attributes(G, 'weight')
+
+fig_graph, ax_graph = plt.subplots(figsize=(12, 12))
+ax_graph.axis('off')
+ax_graph.set_title('Syllable transition graph', fontsize=11)
+
+nx.draw_networkx_nodes(G, pos, ax=ax_graph,
+                       node_size=node_sizes,
+                       node_color='white',
+                       edgecolors='red')
+
+nx.draw_networkx_edges(G, pos, ax=ax_graph,
+                       edgelist=widths.keys(),
+                       width=list(widths.values()),
+                       edge_color='black',
+                       alpha=0.6)
+
+nx.draw_networkx_labels(G, pos, ax=ax_graph,
+                        font_color='black', font_size=9)
 
 plt.tight_layout()
 plt.show()
+# %%
+# =============================================================================
+# Syllable context sequences
+#
+# Finds the most frequent sequences of syllables immediately preceding or
+# following a target syllable (e.g. locomotion syllables 3 and 6), and plots
+# the top-k as horizontal histograms.
+#
+# Notes
+# -----
+# * Pass the FULL comp_df, including syllable 99. Dropping 99 rows beforehand
+#   would splice together instances that were not actually adjacent, turning
+#   3 -> 99 -> 7 into a spurious 3 -> 7. Windows containing 99 are excluded
+#   here instead, via the `exclude` argument.
+# * Windows that straddle a discontinuity are dropped. Consecutive rows of
+#   comp_df are not necessarily adjacent in time: get_syllable_instances drops
+#   NaN segments, so the row before a NaN gap and the row after it sit next to
+#   each other in the frame while being separated in the recording. Contiguity
+#   is tested with start_frame[i+1] == start_frame[i] + duration_frames[i],
+#   which also handles session and track boundaries for free.
+# * get_syllable_instances merges consecutive identical labels into one
+#   instance, so no window can contain an immediate self-repeat.
+# =============================================================================
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from collections import Counter
+
+
+def _instance_groups(comp_df):
+    """
+    Split instances into contiguous runs.
+
+    Returns
+    -------
+    syl   : (n,) int array of syllable labels
+    group : (n,) int array; equal values mean uninterrupted succession
+    """
+    syl   = comp_df['syllable'].values.astype(int)
+    start = comp_df['start_frame'].values.astype(np.int64)
+    dur   = comp_df['duration_frames'].values.astype(np.int64)
+
+    if len(syl) < 2:
+        return syl, np.zeros(len(syl), dtype=int)
+
+    contiguous = start[1:] == start[:-1] + dur[:-1]
+    group = np.concatenate([[0], np.cumsum(~contiguous)])
+    return syl, group
+
+
+def get_context_sequences(comp_df, target, n=2, direction='before',
+                          exclude=(99,), top_k=10):
+    """
+    Count the n-syllable sequences that precede or follow a target syllable.
+
+    Parameters
+    ----------
+    comp_df   : DataFrame with syllable, start_frame, duration_frames
+    target    : int, the syllable whose context is examined
+    n         : int, sequence length (2 or 3 is usually readable)
+    direction : 'before' or 'after'
+    exclude   : iterable of syllables; any window containing one is discarded
+    top_k     : int, number of sequences returned
+
+    Returns
+    -------
+    DataFrame with columns sequence, label, count, frequency, expected, ratio
+        frequency : count / n_windows
+        expected  : count predicted if syllables were drawn independently
+        ratio     : frequency / expected_frequency, so >1 means the sequence
+                    occurs more often than its constituent syllables alone
+                    would predict
+    """
+    if direction not in ('before', 'after'):
+        raise ValueError("direction must be 'before' or 'after'")
+
+    syl, group = _instance_groups(comp_df)
+    exclude = set(exclude)
+    n_inst = len(syl)
+
+    # Marginal instance probabilities for the independence null
+    counts = Counter(s for s in syl if s not in exclude)
+    total  = sum(counts.values())
+    p_marg = {s: c / total for s, c in counts.items()} if total else {}
+
+    windows = []
+    for i in np.flatnonzero(syl == target):
+        if direction == 'before':
+            lo, hi = i - n, i
+        else:
+            lo, hi = i + 1, i + 1 + n
+
+        if lo < 0 or hi > n_inst:
+            continue
+        # Whole window plus the target must lie in one contiguous run
+        if group[lo] != group[i] or group[hi - 1] != group[i]:
+            continue
+
+        win = tuple(syl[lo:hi])
+        if exclude & set(win):
+            continue
+        windows.append(win)
+
+    if not windows:
+        return pd.DataFrame(columns=['sequence', 'label', 'count',
+                                     'frequency', 'expected', 'ratio'])
+
+    tally = Counter(windows)
+    n_win = len(windows)
+
+    rows = []
+    for win, c in tally.most_common(top_k):
+        p_exp = np.prod([p_marg.get(s, 0.0) for s in win])
+        label = (' > '.join(map(str, win)) + f' > [{target}]'
+                 if direction == 'before'
+                 else f'[{target}] > ' + ' > '.join(map(str, win)))
+        rows.append({
+            'sequence':  win,
+            'label':     label,
+            'count':     c,
+            'frequency': c / n_win,
+            'expected':  p_exp * n_win,
+            'ratio':     (c / n_win) / p_exp if p_exp > 0 else np.nan,
+        })
+
+    out = pd.DataFrame(rows)
+    out.attrs['n_windows'] = n_win
+    out.attrs['n_target']  = int((syl == target).sum())
+    return out
+
+
+def plot_context_sequences(comp_df, targets=(3, 6), n=2, top_k=10,
+                           exclude=(99,), show_expected=True):
+    """
+    Grid of horizontal histograms: one row per target, columns before / after.
+
+    When show_expected is True, a hollow marker shows the count predicted under
+    independence, so a tall bar that merely reflects two common syllables is
+    distinguishable from a genuinely stereotyped sequence.
+    """
+    targets = list(targets)
+    fig, axes = plt.subplots(len(targets), 2,
+                             figsize=(15, 3.2 * len(targets) + 1),
+                             squeeze=False)
+
+    results = {}
+    for r, target in enumerate(targets):
+        for c, direction in enumerate(['before', 'after']):
+            ax = axes[r][c]
+            df = get_context_sequences(comp_df, target, n=n,
+                                       direction=direction,
+                                       exclude=exclude, top_k=top_k)
+            results[(target, direction)] = df
+
+            if df.empty:
+                ax.text(0.5, 0.5, f'no windows for syllable {target}',
+                        ha='center', va='center', fontsize=9)
+                ax.set_axis_off()
+                continue
+
+            y = np.arange(len(df))[::-1]        # most frequent at the top
+            ax.barh(y, df['count'], color='steelblue', edgecolor='none')
+
+            if show_expected:
+                ax.scatter(df['expected'], y, s=28, facecolors='none',
+                           edgecolors='crimson', linewidths=1.2, zorder=3,
+                           label='expected if independent')
+                ax.legend(fontsize=7, loc='lower right')
+
+            ax.set_yticks(y)
+            ax.set_yticklabels(df['label'], fontsize=8, family='monospace')
+            ax.set_xlabel('instance count', fontsize=9)
+            ax.set_title(
+                f'{n}-syllable sequences {direction} syllable {target}   '
+                f'(n={df.attrs["n_windows"]} of '
+                f'{df.attrs["n_target"]} occurrences)',
+                fontsize=9
+            )
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+
+    fig.tight_layout()
+    plt.show()
+    return results
+
 
 # =============================================================================
-# Print closest syllable pairs (most similar)
+# Usage
 # =============================================================================
-print("\nClosest syllable pairs by centroid distance:")
-print(f"{'Syl A':>6} {'Syl B':>6} {'Distance':>10}")
+ctx = plot_context_sequences(comp_df, targets=(3, 6), n=2, top_k=10)
 
-# Get upper triangle indices, sorted by distance
-n = len(syl_ids)
-pairs = []
-for i in range(n):
-    for j in range(i + 1, n):
-        pairs.append((syl_ids[i], syl_ids[j], centroid_dist[i, j]))
+# ranked by enrichment rather than raw count
+df = ctx[(3, 'before')]
+print(df.sort_values('ratio', ascending=False)[
+          ['label', 'count', 'expected', 'ratio']].to_string(index=False))
 
-pairs_sorted = sorted(pairs, key=lambda x: x[2])
-for syl_a, syl_b, dist in pairs_sorted[:10]:
-    print(f"{syl_a:>6} {syl_b:>6} {dist:>10.3f}")
+# single direction, longer context
+df = get_context_sequences(comp_df, target=3, n=3, direction='after')
+
+
+# %% limb velocity per syllable
+
+
 
 
 # %% plot and view data (no Umap)
@@ -865,7 +1180,7 @@ from pathlib import Path
 # =============================================================================
 # Config
 # =============================================================================
-SESSION_IDX  = 1        # which session from index to view
+SESSION_IDX  = 4        # which session from index to view
 N_CAMS       = 4
 VIDEO_SUFFIX = '2'      # bak-{cam}-{VIDEO_SUFFIX}.mp4
 FPS          = 25       # frames per second
@@ -1156,3 +1471,6 @@ fig.canvas.mpl_connect('close_event', on_close)
 # Show
 # =============================================================================
 plt.show()
+
+
+
