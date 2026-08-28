@@ -362,9 +362,9 @@ index = np.load(os.path.join(project_dir,'combined_index.npy'), allow_pickle=Tru
 combined_arr = coordinates['track_all']
 
 # Get track1 data from session 0
-entry = index[0]
-start, end = entry['track1']['start'], entry['track1']['end']
-track1_data = combined_arr[start:end+1]
+# entry = index[0]
+# start, end = entry['track1']['start'], entry['track1']['end']
+# track1_data = combined_arr[start:end+1]
 
 # # Print summary
 # for entry in index:
@@ -385,7 +385,9 @@ for t in np.arange(1,len(cent_all)-1):
 
 # %% load keypoint syllables
 
-model_name = '2026_08_19-10_33_58'
+model_name = '2026_08_17-15_01_57'
+
+# model_name = '2026_08_19-10_33_58'
 
 results = load_results(project_dir, model_name)
 syllables_org = np.concatenate([results[k]['syllable'] for k in sorted(results.keys())])
@@ -400,19 +402,16 @@ hist, _ = np.histogram(instances_df['syllable'],np.arange(100),density = True )
 
 syllables_raw = syllables_org.copy() 
 for s in np.unique(syllables_org):
-    if hist[s] < 1*1e-3: # 1% frequency threshold, subject to change
+    if hist[s] < 2*1e-3: # 1% frequency threshold, subject to change
         syllables_raw[np.where(syllables_org == s)] = 99
-    
-# for i in range(1,len(instances_df)):
-#     if instances_df['duration_frames'][i] <3:
-#         syllables_raw[instances_df['start_frame'][i]] = instances_df['syllable'][i-1]
+
+
 
 comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
 trans_combined = get_transition_matrix(comp_df, normalize='bigram')
-# np.save(os.path.join(project_dir,'comp_df.npy'),comp_df,allow_pickle=True)
 comp_df.to_pickle(os.path.join(project_dir, 'comp_df.pkl'))
 # sns.histplot(data = instances_df['syllable'],stat = 'percent')
-sns.histplot(data = comp_df['duration_frames'],binwidth = 1)
+# sns.histplot(data = comp_df['duration_frames'],binwidth = 1)
 
 
 # %% transforming coordinates normalizing pose to center and orientation
@@ -461,7 +460,7 @@ T = transform_coord(combined_arr,S)
 
 # %%
 
-reducer = umap.UMAP(n_neighbors=50,n_components=3,min_dist = 0.1)
+reducer = umap.UMAP(n_neighbors=25,n_components=3,min_dist = 0.1)
 
 embedding = reducer.fit_transform(T,force_all_finite="allow-nan")
 embedding.shape
@@ -979,9 +978,9 @@ def plot_context_sequences(comp_df, targets=(3, 6), n=2, top_k=10,
 # =============================================================================
 # Usage
 # =============================================================================
-ctx = plot_context_sequences(comp_df, targets=(3, 6), n=2, top_k=10)
+ctx = plot_context_sequences(comp_df, targets=(3,4), n=2, top_k=10)
 
-# ranked by enrichment rather than raw count
+9# ranked by enrichment rather than raw count
 df = ctx[(3, 'before')]
 print(df.sort_values('ratio', ascending=False)[
           ['label', 'count', 'expected', 'ratio']].to_string(index=False))
@@ -989,187 +988,9 @@ print(df.sort_values('ratio', ascending=False)[
 # single direction, longer context
 df = get_context_sequences(comp_df, target=3, n=3, direction='after')
 
+print(df.sort_values('ratio', ascending=False)[
+          ['label', 'count', 'expected', 'ratio']].to_string(index=False))
 
-# %% limb velocity per syllable
-
-
-
-
-# %% plot and view data (no Umap)
-
-
-import matplotlib.gridspec as gridspec
-
-vidx = 'vid_1'
-anid  ='animal_2'
-anid2 = 'animal_1'
-# centering data around spine mid
-# add "if spinemid is nan, then ...
-
-entry = index[1]
-anid  = 'track1'
-anid2 = 'track2'
-
-
-
-start, end = entry[anid2]['start'], entry[anid2]['end']
-newdata2 = combined_arr[start:end+1]
-cent2 = cent_all[start:end+1]
-
-start, end = entry[anid]['start'], entry[anid]['end']
-newdata = combined_arr[start:end+1]
-speed = S[start:end+1]
-syllab = syllables_raw[start:end+1]
-cent = cent_all[start:end+1]
-# newdata2 = data_all[vidx][anid2]['keypoints']
-# newdata = data_all[vidx][anid]['keypoints']
-# emb3 = data_all[vidx][anid]['UMAP']
-
-xtime = np.arange(len(newdata))*0.04
-# for t in np.arange(np.size(newdata,axis = 0)):
-#     for sk in np.arange(len(skeleton2)):
-#         newdata[t,sk,:] = D_3[t,sk,:] # - D_1[t,8,:]
-
-# newdata = newdata[ani_ind['not_nan'],:,:]
-
-# --- 2. Set up the Figure and 3D Axes ---
-fig = plt.figure(figsize=(16, 12))
-# Add 3D axes
-
-gs = gridspec.GridSpec(4, 3, figure=fig)
-
-ax = fig.add_subplot(gs[:, 0:2], projection='3d')
-
-axs = {}
-
-axs[0] = fig.add_subplot(gs[0:2,2], projection='3d')
-
-for f in np.arange(2,4):
-    axs[f] = fig.add_subplot(gs[f, 2])  # row f, column 2
-
-
-
-fig.subplots_adjust(bottom=0.25) # Adjust subplot to make room for the slider
-t = 0
-
-ax_l = 450
-
-ax.set_xlim([-150, ax_l])
-ax.set_ylim([-150, ax_l])
-ax.set_zlim([-300, 500])
-
-# for f in np.arange(3):
-#     axs[f].plot(data_all[vidx]['animal_2']['centroid'][:,f])
-#     axs[f].set_xlim([-50,50])
-    
-
-# sc = axs[0].scatter(emb2[:, 0],emb2[:, 1],c = 'b',alpha = 0.01)
-
-# red_dot, = axs[0].plot(emb3[0, 0], emb3[0, 1], 'ro', markersize=10, zorder=5)
-
-
-axs[2].plot(xtime,np.convolve(speed[:,0],10,mode = 'same')*0.04)
-axs[2].set_xlim([-50*.04,50*.04])
-axs[2].set_ylabel('velocity cm/s')
-axs[2].set_ylim([0,150])
-axs[3].plot(xtime,syllab)
-axs[3].set_xlim([-50*.04,50*.04])
-axs[3].set_ylim([0,25])
-axs[2].set_title('time (s)')
-axs[3].set_ylabel('syllable identity')
-
-
-red_line = axs[3].axvline(x=t, ymin=0, ymax=1,color = 'red')
-lines = {}
-lines2 = {}
-
-# plot skeleton
-# for sk,skc in zip(skeleton2,sk_color):
-for sk in np.arange(len(skeleton2)):
-    lines[sk] = ax.plot3D(newdata[t,skeleton2[sk],0], newdata[t,skeleton2[sk],1], -newdata[t,skeleton2[sk],2], sk_color[sk])
-    lines2[sk] = ax.plot3D(newdata2[t,skeleton2[sk],0], newdata2[t,skeleton2[sk],1], -newdata2[t,skeleton2[sk],2], sk_color[sk],alpha = 0.2)
-  
-
-# ---2.1 Plot centroids and syllables
-
-samp_t = random.sample(range(0,len(newdata)),5000)
-axs[0].scatter3D(cent[samp_t,0],
-             cent[samp_t,1],
-             cent[samp_t,2]) 
-
-axs[0].scatter3D(cent2[samp_t,0],
-             cent2[samp_t,1],
-             cent2[samp_t,2],alpha = 0.2) 
-
-# red_scatter, = ax.plot3D(data_all[vidx][anid]['centroid'][0,0],
-#                           data_all[vidx][anid]['centroid'][0,1],
-#                           data_all[vidx][anid]['centroid'][0,2],'ro', markersize=10, zorder=5)
- 
-
-# --- 3. Create the Slider Widget ---
-ax_slider = fig.add_axes([0.25, 0.1, 0.65, 0.03]) # [left, bottom, width, height]
-time_slider = Slider(
-    ax=ax_slider,
-    label='Time Step',
-    valmin=0,
-    valmax=np.size(newdata,axis = 0) - 1,   
-    valinit=0,
-    valstep=1.0 # Ensures the slider snaps to integer time steps
-)
-
-
-# Create an array of 5 blue pixels
-c_array = np.tile(np.array([0.0, 0.0, 1.0, 0.01], dtype=np.float32), (np.size(newdata, axis=0), 1))
-
-# --- 4. Define the Update Function and Connect to Slider ---
-def update(val):
-    """Callback function to update the plot data based on slider value."""
-    t = int(time_slider.val)
-    # Update the data of the 3D plot artist
-    for sk in np.arange(len(skeleton2)):
-        lines[sk][0].set_data_3d(newdata[t,skeleton2[sk],0], newdata[t,skeleton2[sk],1], -newdata[t,skeleton2[sk],2])
-        lines2[sk][0].set_data_3d(newdata2[t,skeleton2[sk],0], newdata2[t,skeleton2[sk],1], -newdata2[t,skeleton2[sk],2])
-
-        # lines[sk].set_color(sk_color[sk])
-    
-    # update centroid
-    # red_scatter.set_data_3d([data_all[vidx][anid]['centroid'][t,0]],
-    #                         [data_all[vidx][anid]['centroid'][t,1]],
-    #                         [data_all[vidx][anid]['centroid'][t,2]])
-    
-    # update subplot panels    
-    for f in np.arange(2,4):
-        axs[f].set_xlim([(-50+t)*.04,(50+t)*.04])
-        
-    red_line.set_xdata([t*0.04])
-    # Update the scatter
-    # red_dot.set_data([emb3[t, 0]], [emb3[t, 1]])
-    
-    # update xlabel for syllable names 
-    if syllab[t] == 3:
-        axs[3].set_xlabel('walking')
-    else:
-        axs[3].set_xlabel(str(syllab[t]))
-    # Redraw the figure
-    
-    
-    fig.canvas.draw_idle()
-    
-# Register the update function with the slider's on_changed event
-time_slider.on_changed(update)
-
-def on_key(event):
-    step = 10 if event.key in ('up', 'down') else 1
-    if event.key in ('right', 'up'):
-        time_slider.set_val(min(time_slider.val + step, time_slider.valmax))
-    elif event.key in ('left', 'down'):
-        time_slider.set_val(max(time_slider.val - step, time_slider.valmin))
-
-fig.canvas.mpl_connect('key_press_event', on_key)
-
-
-# --- 5. Display the Plot ---
-plt.show()
 
 
 # %% plot and view data
@@ -1180,7 +1001,7 @@ from pathlib import Path
 # =============================================================================
 # Config
 # =============================================================================
-SESSION_IDX  = 4        # which session from index to view
+SESSION_IDX  = 1        # which session from index to view
 N_CAMS       = 4
 VIDEO_SUFFIX = '2'      # bak-{cam}-{VIDEO_SUFFIX}.mp4
 FPS          = 25       # frames per second
@@ -1208,7 +1029,7 @@ newdata = newdata_old.copy()
 
 
 for sk in np.arange(16):
-    newdata[:,sk,:] = newdata_old[:,sk,:]-cent[:,:]
+    newdata[:,sk,:] = newdata_old[:,sk,:] #-cent[:,:]
 # fig, axs = plt.subplots(4, 1)
 #     # sc = 3
 # for i in [0,1,2]:
@@ -1288,18 +1109,18 @@ ax_vid.axis('off')
 ax_vid.set_title('Camera grid', fontsize=9)
 
 # # Right row 0: 3D pose for non centered
-# ax_pose = fig.add_subplot(gs[0:2, 1], projection='3d')
-# ax_pose.set_xlim([-200, 450])
-# ax_pose.set_ylim([-200, 450])
-# ax_pose.set_zlim([-500, 300])
-# ax_pose.set_title('3D pose', fontsize=9)
+ax_pose = fig.add_subplot(gs[0:2, 1], projection='3d')
+ax_pose.set_xlim([-200, 450])
+ax_pose.set_ylim([-200, 450])
+ax_pose.set_zlim([-200, 600])
+ax_pose.set_title('3D pose', fontsize=9)
 
 # Right row 0: 3D pose for centered
-ax_pose = fig.add_subplot(gs[0:2, 1], projection='3d')
-ax_pose.set_xlim([-200, 200])
-ax_pose.set_ylim([-200, 200])
-ax_pose.set_zlim([-200, 200])
-ax_pose.set_title('3D pose', fontsize=9)
+# ax_pose = fig.add_subplot(gs[0:2, 1], projection='3d')
+# ax_pose.set_xlim([-200, 200])
+# ax_pose.set_ylim([-200, 200])
+# ax_pose.set_zlim([-200, 200])
+# ax_pose.set_title('3D pose', fontsize=9)
 
 
 # Right row 1: centroid scatter
@@ -1376,13 +1197,13 @@ for sk in range(len(skeleton2)):
     lines[sk]  = ax_pose.plot3D(
         newdata[t0, skeleton2[sk], 0],
         newdata[t0, skeleton2[sk], 1],
-        -newdata[t0, skeleton2[sk], 2],
+        newdata[t0, skeleton2[sk], 2],
         sk_color[sk]
     )
     lines2[sk] = ax_pose.plot3D(
         newdata2[t0, skeleton2[sk], 0],
         newdata2[t0, skeleton2[sk], 1],
-        -newdata2[t0, skeleton2[sk], 2],
+        newdata2[t0, skeleton2[sk], 2],
         sk_color[sk], alpha=0.2
     )
 
@@ -1422,12 +1243,12 @@ def update(val):
         lines[sk][0].set_data_3d(
             newdata[t, skeleton2[sk], 0],
             newdata[t, skeleton2[sk], 1],
-            -newdata[t, skeleton2[sk], 2]
+            newdata[t, skeleton2[sk], 2]
         )
         lines2[sk][0].set_data_3d(
             newdata2[t, skeleton2[sk], 0],
             newdata2[t, skeleton2[sk], 1],
-            -newdata2[t, skeleton2[sk], 2]
+            newdata2[t, skeleton2[sk], 2]
         )
 
     # --- Update time window ---
@@ -1473,4 +1294,70 @@ fig.canvas.mpl_connect('close_event', on_close)
 plt.show()
 
 
+# np.save('/home/jlee629/kpmoseq/projects/feb_may/combined_eg.npy',combined_arr[0:50000,:,:],allow_pickle = True)
+comp_df.to_csv(os.path.join(project_dir, 'comp_df_v2.csv'), index=False)
 
+
+# %% posture angle testing (temp code)
+
+
+# ax   = combined_arr[:, 8, :] - combined_arr[:, 9, :]          # trunk vector
+# run  = np.linalg.norm(ax[:, [0, 1]], axis=1)   # horizontal component (x,y)
+# elev = np.degrees(np.arctan2(ax[:, 2]*-1, run))
+
+# sns.histplot(elev)
+
+
+# L = np.linalg.norm(combined_arr[:, 8, :] - combined_arr[:, 9, :], axis=1)
+# good = np.abs(L - np.nanmedian(L)) / np.nanmedian(L) < 0.25
+
+# sns.histplot(elev[good])
+
+Z_SIGN = -1
+
+# quality filter
+L    = np.linalg.norm(combined_arr[:, 8, :] - combined_arr[:, 9, :], axis=1)
+good = np.abs(L - np.nanmedian(L)) / np.nanmedian(L) < 0.25
+
+# trunk elevation, folded
+v    = combined_arr[:, 8, :] - combined_arr[:, 9, :]
+elev = np.abs(np.degrees(np.arctan2(v[:, 2] * Z_SIGN,
+                                    np.linalg.norm(v[:, [0, 1]], axis=1))))
+
+
+v1 = combined_arr[:, 9, :] - combined_arr[:, 8, :]
+v2 = combined_arr[:, 3, :] - combined_arr[:, 8, :]
+n1 = np.linalg.norm(v1, axis=1)
+n2 = np.linalg.norm(v2, axis=1)
+with np.errstate(invalid='ignore', divide='ignore'):
+    cos = np.einsum('ij,ij->i', v1, v2) / (n1 * n2)
+cos = np.clip(cos, -1.0, 1.0)
+flexion = np.degrees(np.arccos(cos))
+
+sns.histplot(flexion[good])
+
+#%%
+
+# frames belonging to each syllable
+d = comp_df[comp_df.syllable != 99]
+sel = {}
+for s, g in d.groupby('syllable'):
+    i = np.concatenate([np.arange(r.start_frame, r.start_frame + r.duration_frames)
+                        for r in g.itertuples(index=False)])
+    e = elev[i[good[i] & np.isfinite(elev[i])]]
+    if len(e) >= 30:
+        sel[s] = e
+
+order = sorted(sel, key=lambda s: np.median(sel[s]))
+ncol  = 5
+nrow  = int(np.ceil(len(order) / ncol))
+fig, axes = plt.subplots(nrow, ncol, figsize=(3.2*ncol, 2.4*nrow), sharex=True)
+for ax, s in zip(axes.ravel(), order):
+    sns.histplot(sel[s], bins=np.arange(0, 91, 5), ax=ax, color='steelblue')
+    ax.axvline(np.median(sel[s]), color='firebrick', ls='--', lw=1)
+    ax.set_title(f'syl {s}  n={len(sel[s])}  med={np.median(sel[s]):.0f}°', fontsize=9)
+    ax.set_xlabel(''); ax.set_ylabel('')
+for ax in axes.ravel()[len(order):]:
+    ax.set_axis_off()
+fig.supxlabel('trunk elevation (deg)')
+fig.tight_layout()

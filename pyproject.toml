@@ -1,0 +1,19 @@
+[project]
+name = "marmo"
+version = "0.1.0"
+description = "3D pose and behaviour analysis for in-cage marmosets"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy", "pandas", "h5py", "scipy",
+    "matplotlib", "seaborn",
+    "scikit-learn", "umap-learn",
+    "opencv-python", "networkx", "colorcet",
+]
+ 
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+ 
+[tool.setuptools]
+packages = ["marmo"]
+ 
