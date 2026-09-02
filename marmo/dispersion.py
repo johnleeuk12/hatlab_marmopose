@@ -31,7 +31,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from marmo.config import (TAIL, NECK, TRUNK_KEYPOINTS, DISTAL_KEYPOINTS,
-                          DEFAULT_EXCLUDE_BODYPARTS)
+                          DEFAULT_EXCLUDE_BODYPARTS, EXCLUDE_SYLLABLE)
 from marmo.geometry import ego_frame, body_length, robust_dispersion
 
 
@@ -40,7 +40,8 @@ def keypoint_dispersion(combined_arr, comp_df, bodyparts,
                         min_frames_per_instance=5,
                         min_instances=3,
                         window_frames=None,
-                        exclude_syllable=99,
+                        syllables=None,
+                        exclude_syllables=(EXCLUDE_SYLLABLE,),
                         exclude_bodyparts=DEFAULT_EXCLUDE_BODYPARTS,
                         normalize_by_body_length=True):
     """
@@ -61,7 +62,20 @@ def keypoint_dispersion(combined_arr, comp_df, bodyparts,
                     syllables, because a longer instance gives a keypoint more
                     time to travel and so inflates its dispersion regardless of
                     how vigorously it moved.
-    exclude_syllable : label to drop (the low-frequency catch-all)
+    syllables : explicit list of syllables to INCLUDE. None means all present
+                in comp_df. Use this when you already have a set in hand, e.g. a
+                stationary list.
+    exclude_syllables : labels to DROP. Accepts a single int or any iterable, so
+                exclude_syllables=99 and exclude_syllables=(99, 7, 15) both work.
+                Defaults to the low-frequency catch-all alone. Applied after
+                `syllables`, so an explicit include list still has the catch-all
+                removed unless you pass exclude_syllables=().
+
+                Note this only drops syllables from the OUTPUT tables. It does
+                not change the egocentric frame, the body-length scale, or the
+                quality threshold, all of which are computed over the whole
+                array -- so excluding a syllable never shifts the values
+                reported for the ones you keep.
     exclude_bodyparts : names omitted from the output tables. Excluded at
                     output time rather than by slicing the array, so
                     origin_idx / axis_idx keep referring to the original
@@ -100,8 +114,17 @@ def keypoint_dispersion(combined_arr, comp_df, bodyparts,
     n_ego_bad = int(np.isnan(ego_all[:, origin_idx, 0]).sum())
     print(f'  {n_ego_bad} of {len(combined_arr)} frames had no usable body frame')
 
-    df = comp_df[comp_df['syllable'] != exclude_syllable]
+    df = comp_df
+    if syllables is not None:
+        df = df[df['syllable'].isin(list(syllables))]
+    if exclude_syllables is not None:
+        drop = ([exclude_syllables] if np.isscalar(exclude_syllables)
+                else list(exclude_syllables))
+        if drop:
+            df = df[~df['syllable'].isin(drop)]
     syllables = sorted(df['syllable'].unique())
+    if not syllables:
+        raise ValueError('no syllables left after filtering')
 
     world_rows, ego_rows, cov_rows, summary = {}, {}, {}, []
 
@@ -166,7 +189,7 @@ def keypoint_dispersion(combined_arr, comp_df, bodyparts,
 def plot_keypoint_dispersion(res, coverage_thresh=0.6,
                              hide_in_ego=('neck', 'tailbase'),
                              hide_in_world=(),
-                             figsize=(18, 10)):
+                             figsize=(18, 10),font_size_multiplier = 1):
     """
     World and egocentric heatmaps (keypoints on y, syllables on x) plus a
     world-vs-egocentric scatter.
@@ -211,11 +234,11 @@ def plot_keypoint_dispersion(res, coverage_thresh=0.6,
 
         im = ax.imshow(vals, aspect='auto', cmap='magma')
         ax.set_xticks(range(len(syls)))
-        ax.set_xticklabels(syls, fontsize=8)
+        ax.set_xticklabels(syls, fontsize=8*font_size_multiplier)
         ax.set_yticks(range(len(rows_kept)))
-        ax.set_yticklabels(rows_kept, fontsize=8)
-        ax.set_xlabel('syllable', fontsize=9)
-        ax.set_title(f'{title} - dispersion ({unit})', fontsize=10)
+        ax.set_yticklabels(rows_kept, fontsize=8*font_size_multiplier)
+        ax.set_xlabel('syllable', fontsize=9*font_size_multiplier)
+        ax.set_title(f'{title} - dispersion ({unit})', fontsize=10*font_size_multiplier)
         plt.colorbar(im, ax=ax, fraction=0.030, pad=0.02)
 
         for i in range(vals.shape[0]):
@@ -233,14 +256,16 @@ def plot_keypoint_dispersion(res, coverage_thresh=0.6,
     ax.scatter(wm, em, s=60, c='steelblue', edgecolors='k',
                linewidths=.6, zorder=3)
     for syl in syls:
-        ax.annotate(str(syl), (wm[syl], em[syl]), fontsize=8,
+        ax.annotate(str(syl), (wm[syl], em[syl]), fontsize=8*font_size_multiplier,
                     xytext=(4, 3), textcoords='offset points')
     ax.axvline(np.nanmedian(wm), color='grey', lw=.8, ls='--')
     ax.axhline(np.nanmedian(em), color='grey', lw=.8, ls='--')
-    ax.set_xlabel(f'mean world dispersion ({unit})', fontsize=9)
-    ax.set_ylabel(f'mean egocentric dispersion ({unit})', fontsize=9)
+    ax.axvline(np.percentile(wm,75), color='red', lw=.8, ls='--')
+    ax.axhline(np.percentile(em,75), color='red', lw=.8, ls='--')
+    ax.set_xlabel(f'mean world dispersion ({unit})', fontsize=9*font_size_multiplier)
+    ax.set_ylabel(f'mean egocentric dispersion ({unit})', fontsize=9*font_size_multiplier)
     ax.set_title('Translation vs articulation\n(dashed = median split)',
-                 fontsize=10)
+                 fontsize=10*font_size_multiplier)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 

@@ -38,7 +38,8 @@ Typical console session
 
 __version__ = '0.1.0'
 
-from marmo import config
+from marmo import (config, io, geometry, instances, posture,dispersion, clustering, transitions)
+
 from marmo.config import (BODYPARTS, TAIL, SPINE, NECK, TAILBASE, SPINEMID,
                           FPS, DT, Z_SIGN, EXCLUDE_SYLLABLE)
 

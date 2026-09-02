@@ -86,6 +86,7 @@ def frame_angles(pts, z_sign=Z_SIGN, trunk_thr=TRUNK_THR, fold=FOLD_ABS,
             'q_trunk': q1, 'q_upper': q2}
 
 
+
 def instance_posture(pts, comp_df, ang=None, min_frames=MIN_FRAMES,
                      trans_range=TRANS_RANGE, exclude=EXCLUDE_SYLLABLE, verbose=True):
     """
@@ -266,38 +267,74 @@ def validate_split(sp, verbose=True):
     return t
 
 
-def plot_by_syllable(I, metric='elevation', ncol=5, min_inst=MIN_INSTANCES,
-                     drop_transitional=True, bins=None, syllables=None):
+def plot_by_syllable(I, metric='elevation', pooled=False, ncol=5,
+                     min_inst=MIN_INSTANCES, drop_transitional=True,
+                     bins=None, syllables=None):
     """
-    Grid of per-instance histograms, one panel per syllable, sorted by median.
-
+    Per-instance histograms of elevation or flexion.
+ 
+    pooled=False  a grid, one panel per syllable, sorted by median (default)
+    pooled=True   a single panel with the selected syllables combined
+ 
     syllables : optional list to restrict to. When given, min_inst is ignored so
                 that explicitly requested syllables are shown even if sparse.
+ 
+    A note on the pooled view, since it is easy to over-read. Superimposing
+    syllables destroys structure that is present within them: on this data the
+    high elevation mode is shared across syllables (54-78 deg, median 68) while
+    the low mode is syllable-specific (10-58 deg). Pooling therefore stacks the
+    high modes and smears the low ones into a continuum, so the pooled
+    distribution can look unimodal while syllables 5, 9, 13 and 19 are each
+    clearly bimodal. Pooling a hand-picked subset that shares a mode is the
+    exception where it does behave -- comparing two candidate groups, say.
+    Use pooled for the overall range, the grid for structure, and
+    find_syllable_troughs for a numerical answer.
     """
     J = I[~I.transitional] if drop_transitional else I
     J = J[J[metric].notna()]
     if syllables is not None:
         J = J[J.syllable.isin(list(syllables))]
+    if not len(J):
+        raise ValueError('no instances to plot')
+    if bins is None:
+        bins = np.arange(0, 91, 5) if metric == 'elevation' else np.arange(60, 181, 5)
+ 
+    def panel(ax, v, title):
+        ax.hist(v, bins=bins, color='steelblue', edgecolor='white', linewidth=.3)
+        ax.axvline(np.median(v), color='firebrick', ls='--', lw=1)
+        ax.set_title(title, fontsize=8)
+        ax.tick_params(labelsize=7)
+ 
+    def stats(v):
+        return f'n={len(v)}\nmed {np.median(v):.0f}  IQR ' \
+               f'{np.percentile(v, 75) - np.percentile(v, 25):.0f}'
+ 
+    if pooled:
+        v = J[metric].values
+        syls = sorted(J.syllable.unique())
+        shown = (f'{len(syls)} syllables' if len(syls) > 8 else f'syl {syls}')
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        panel(ax, v, f'{metric}, pooled over {shown}\n{stats(v)}')
+        ax.set_xlabel(f'{metric} (deg)')
+        ax.set_ylabel('instances')
+        fig.tight_layout()
+        plt.show()
+        return fig
+ 
+    if syllables is not None:
         grp = {s: g[metric].values for s, g in J.groupby('syllable')}
     else:
         grp = {s: g[metric].values for s, g in J.groupby('syllable')
                if len(g) >= min_inst}
     if not grp:
         raise ValueError('no syllables to plot')
-    if bins is None:
-        bins = np.arange(0, 91, 5) if metric == 'elevation' else np.arange(60, 181, 5)
+ 
     order = sorted(grp, key=lambda s: np.median(grp[s]))
     nrow = int(np.ceil(len(order) / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(3.1 * ncol, 2.3 * nrow),
                              sharex=True, squeeze=False)
     for ax, s in zip(axes.ravel(), order):
-        v = grp[s]
-        ax.hist(v, bins=bins, color='steelblue', edgecolor='white', linewidth=.3)
-        ax.axvline(np.median(v), color='firebrick', ls='--', lw=1)
-        iqr = np.percentile(v, 75) - np.percentile(v, 25)
-        ax.set_title(f'syl {s}  n={len(v)}\nmed {np.median(v):.0f}  IQR {iqr:.0f}',
-                     fontsize=8)
-        ax.tick_params(labelsize=7)
+        panel(ax, grp[s], f'syl {s}  {stats(grp[s])}')
     for ax in axes.ravel()[len(order):]:
         ax.set_axis_off()
     fig.supxlabel(f'{metric} (deg)')

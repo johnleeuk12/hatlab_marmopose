@@ -209,7 +209,7 @@ def plot_umap_3d(emb, feats, labels=None, label_name=None,
 
 def plot_umap_projections(emb, feats, color_by=None, cmap='viridis',
                           labels=None, label_name=None,
-                          figsize=(18, 5.5), point_size=8):
+                          figsize=(18, 5.5), point_size=14):
     """
     Three 2D projections of the 3D embedding -- dims 1-2, 1-3, 2-3 -- matching
     the XY/XZ/YZ layout in analysis_postproc.py.
@@ -246,7 +246,7 @@ def plot_umap_projections(emb, feats, color_by=None, cmap='viridis',
                            color=pal[c], edgecolors='none',
                            label=str(s) if ax is axes[0] else None)
                 ax.annotate(str(s), (np.median(emb[m, i]), np.median(emb[m, j])),
-                            fontsize=8, weight='bold',
+                            fontsize=16, weight='bold',
                             bbox=dict(boxstyle='round,pad=.12', fc='white',
                                       alpha=.6, ec='none'))
         else:
@@ -255,13 +255,13 @@ def plot_umap_projections(emb, feats, color_by=None, cmap='viridis',
                             cmap=cmap, alpha=.75, edgecolors='none')
             if ax is axes[-1]:
                 plt.colorbar(sc, ax=ax, fraction=.046, pad=.04, label=name)
-        ax.set_xlabel(f'dim {i+1}', fontsize=9)
-        ax.set_ylabel(f'dim {j+1}', fontsize=9)
+        ax.set_xlabel(f'dim {i+1}', fontsize=16)
+        ax.set_ylabel(f'dim {j+1}', fontsize=16)
         ax.set_title(ttl, fontsize=10)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
     if color_by is None:
-        axes[0].legend(fontsize=6, ncol=2, markerscale=2, frameon=False)
+        axes[0].legend(fontsize=10, ncol=2, markerscale=2, frameon=False)
     ttl = f'coloured by {label_name}' if color_by is None else \
           f'coloured by {next(iter(color_by))}'
     fig.suptitle(f'Per-instance pose UMAP projections — {ttl}', fontsize=11)

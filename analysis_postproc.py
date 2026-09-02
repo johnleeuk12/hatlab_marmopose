@@ -28,259 +28,20 @@ import colorcet as cc
 import pandas as pd
 from datashader.mpl_ext import dsshow
 
-
+# import marmo as mm
 
 logger = logging.getLogger(__name__)
 
 # %% helper functions
 
-def marmopose_loader(filepath,track_name):
-    """Load keypoints from sleap-anipose hdf5 files."""
-    with h5py.File(filepath, "r") as f:
-        coords = f[track_name][()]
-        if "point_scores" in f.keys():
-            confs = f["point_scores"][()]
-        else:
-            confs = np.ones_like(coords[..., 0])
-        bodyparts = ["bodypart{}".format(i) for i in range(coords.shape[1])]
-        # if coords.shape[1] == 1:
-        coordinates = {track_name: coords}
-        confidences = {track_name: confs}
-        # else:
-        #     coordinates = {
-        #         f"{name}_track{i}": coords[:, i] for i in range(coords.shape[1])
-        #     }
-        #     confidences = {
-        #         f"{name}_track{i}": confs[:, i] for i in range(coords.shape[1])
-        #     }
-    return coordinates, confidences, bodyparts
-
-
-def save_points_3d_h5(points: np.ndarray, name: str, file_path: Path) -> None:
-    """
-    Saves 3D points for a track to an HDF5 file.
-
-    Args:
-        points: The 3D points to save. Shape of (n_frames, n_bodyparts, 3), final channel (x, y, z).
-        name: The name of the track.
-        file_path: The path to the HDF5 file.
-    """
-    with h5py.File(file_path, 'a') as f:
-        if name in f:
-            del f[name]
-            logger.info(f'Overwriting existing {name} in {file_path}')
-        f.create_dataset(name, data=points)
-
-    logger.info(f'Saving 3D points for {name} in {file_path}')
-
-
-def load_points_3d_h5(file_path: Path) -> np.ndarray:
-    """
-    Load 3D points from an HDF5 file.
-
-    Args:
-        file_path: Path to the HDF5 file.
-
-    Returns:
-        Array of 3D points, sorted by track name.
-            - Shape: (n_tracks, n_frames, n_bodyparts, 3)
-            - Final channel: (x, y, z)
-    """
-    all_points_3d = []
-    with h5py.File(file_path, 'r') as f:
-        keys = sorted(list(f.keys()))
-        for name in keys:
-            points = f[name][:]
-            all_points_3d.append(points)
-            
-    all_points_3d = np.array(all_points_3d)
-    
-    logger.info(f'Loaded 3D points from {file_path} with order: {keys}')
-    return all_points_3d
-
-
-def init_appendable_h5(config) -> None:
-    """
-    Initializes the HDF5 file with extendable datasets for cameras and tracks.
-
-    Args:
-        config: The configuration object.
-    """
-    n_tracks = 2
-    n_bodyparts = len(config['bodyparts'])
-
-
-    points_3d_path = Path(config['path']) / 'original_new.h5'
-    with h5py.File(points_3d_path, 'w') as f:
-        for track_idx in range(n_tracks):
-            track_name = f'track{track_idx+1}'
-            f.create_dataset(track_name,
-                             shape=(0, n_bodyparts, 3),
-                             maxshape=(None, n_bodyparts, 3),
-                             chunks=(1, n_bodyparts, 3),
-                             dtype='float32')
-
-def load_results(project_dir=None, model_name=None, path=None):
-    """Load the results from a modeled dataset.
-
-    The results path can be specified directly via `path`. Otherwise it is
-    assumed to be `{project_dir}/{model_name}/results.h5`.
-
-    Parameters
-    ----------
-    project_dir: str, default=None
-    model_name: str, default=None
-    path: str, default=None
-
-    Returns
-    -------
-    results: dict
-        See :py:func:`keypoint_moseq.fitting.apply_model`
-    """
-    path = _get_path(project_dir, model_name, path, "results.h5")
-    return load_hdf5(path)
-
-
-def load_hdf5(filepath, datapath=None):
-    """Load a dict of pytrees from an hdf5 file.
-
-    Parameters
-    ----------
-    filepath: str
-        Path of the hdf5 file to load.
-
-    datapath: str, default=None
-        Path within the hdf5 file to load the data from. If None, the data is
-        loaded from the root of the hdf5 file.
-
-    Returns
-    -------
-    save_dict: dict
-        Dictionary where the values are pytrees, i.e. recursive collections of
-        tuples, lists, dicts, and numpy arrays.
-    """
-    with h5py.File(filepath, "r") as f:
-        if datapath is None:
-            return {k: _loadtree_hdf5(f[k]) for k in f}
-        else:
-            return _loadtree_hdf5(f[datapath])
-
-def _loadtree_hdf5(leaf):
-    """Recursively load a pytree from an h5 file group."""
-    if isinstance(leaf, h5py.Dataset):
-        data = np.array(leaf[()])
-        if h5py.check_dtype(vlen=data.dtype) == str:
-            data = np.array([item.decode("utf-8") for item in data])
-        elif data.dtype.kind == "S":
-            data = data.item().decode("utf-8")
-        elif data.shape == ():
-            data = data.item()
-        return data
-    else:
-        leaf_type = leaf.attrs["type"]
-        values = map(_loadtree_hdf5, leaf.values())
-        if leaf_type == "dict":
-            return dict(zip(leaf.keys(), values))
-        elif leaf_type == "list":
-            return list(values)
-        elif leaf_type == "tuple":
-            return tuple(values)
-        else:
-            raise ValueError(f"Unrecognized type {leaf_type}")
-
-
-
-def _get_path(project_dir, model_name, path, filename, pathname_for_error_msg="path"):
-    # if path is None:
-    #     assert project_dir is not None and model_name is not None, fill(
-    #         f"`model_name` and `project_dir` are required if `{pathname_for_error_msg}` is None."
-    #     )
-    path = os.path.join(project_dir, model_name, filename)
-    return path
-
-def get_syllable_instances(syllables_raw, combined_arr, fps=25, min_duration=3):
-    syl = np.asarray(syllables_raw)
-    nan_mask = np.isnan(combined_arr).any(axis=(1, 2))
-    n = len(syl)
-
-    cols = ['syllable', 'start_frame', 'duration_frames']
-    if n == 0:
-        return pd.DataFrame(columns=cols)
-
-    # --- Initial segmentation: split on label change or NaN-status change ---
-    change = (np.diff(syl) != 0) | (np.diff(nan_mask.astype(int)) != 0)
-    bounds = np.where(change)[0] + 1
-    starts = np.concatenate(([0], bounds))
-    ends   = np.concatenate((bounds, [n]))
-
-    runs = [{'start': int(s), 'end': int(e), 'label': int(syl[s]),
-             'is_nan': bool(nan_mask[s]), 'dropped': False}
-            for s, e in zip(starts, ends)]
-
-    # --- Absorb short runs, left to right so relabelling cascades ---
-    n_prev = n_next = n_drop = 0
-    for i, r in enumerate(runs):
-        if r['is_nan'] or (r['end'] - r['start']) >= min_duration:
-            continue
-
-        prev = runs[i - 1] if i > 0 else None
-        nxt  = runs[i + 1] if i + 1 < len(runs) else None
-
-        prev_ok = prev is not None and not prev['is_nan'] and not prev['dropped']
-        next_ok = nxt  is not None and not nxt['is_nan']
-
-        if prev_ok:
-            r['label'] = prev['label']
-            n_prev += 1
-        elif next_ok:
-            r['label'] = nxt['label']
-            n_next += 1
-        else:
-            r['dropped'] = True
-            n_drop += 1
-
-    # --- Emit, merging runs that now share a label and stay frame-adjacent ---
-    rows = []
-    for r in runs:
-        if r['is_nan'] or r['dropped']:
-            continue
-        if rows and rows[-1]['syllable'] == r['label'] \
-                and rows[-1]['start_frame'] + rows[-1]['duration_frames'] == r['start']:
-            rows[-1]['duration_frames'] += r['end'] - r['start']
-        else:
-            rows.append({'syllable':        r['label'],
-                         'start_frame':     r['start'],
-                         'duration_frames': r['end'] - r['start']})
-
-    out = pd.DataFrame(rows, columns=cols)
-    out.attrs['n_absorbed_prev'] = n_prev
-    out.attrs['n_absorbed_next'] = n_next
-    out.attrs['n_dropped']       = n_drop
-    # print(f'  short runs (<{min_duration} frames): '
-    #       f'{n_prev} absorbed into preceding, '
-    #       f'{n_next} into following, {n_drop} dropped')
-    return out
-
-def get_transition_matrix(inst_df, n_states=100, normalize='bigram'):
-    syl = inst_df['syllable'].values
-    
-    trans_mat = np.zeros((n_states, n_states), dtype=float)
-    np.add.at(trans_mat, (syl[:-1], syl[1:]), 1)
-
-    if normalize == 'bigram':
-        total = trans_mat.sum()
-        if total > 0:
-            trans_mat /= total
-    elif normalize == 'rows':
-        row_sums = trans_mat.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1
-        trans_mat /= row_sums
-
-    return trans_mat
+import marmo.io as io
+from marmo.instances import get_syllable_instances
+import marmo.transitions as transitions
 
 
 # %% Init
-project_dir = "/home/jlee629/kpmoseq/projects/feb_may"
+# project_dir = "/home/jlee629/kpmoseq/projects/feb_may"
+project_dir = 'D:/KeypointMoseq/projects/feb_may'
 fname = 'combined.h5'
 
 
@@ -355,7 +116,7 @@ config['bodyparts'] = bodyparts_real
 
 
 fpath1 = os.path.join(project_dir,fname)
-coordinates, confidences, bodyparts =marmopose_loader(fpath1,'track_all')
+coordinates, confidences, bodyparts =io.marmopose_loader(fpath1,'track_all')
 
 
 index = np.load(os.path.join(project_dir,'combined_index.npy'), allow_pickle=True)
@@ -372,7 +133,7 @@ combined_arr = coordinates['track_all']
 #     print(f"  track1: {entry['track1']['start']} -> {entry['track1']['end']}")
 #     print(f"  track2: {entry['track2']['start']} -> {entry['track2']['end']}")
 
-coordinates, _, _ =marmopose_loader(os.path.join(project_dir,'combined_centroid.h5'),'centroid_all')
+coordinates, _, _ =io.marmopose_loader(os.path.join(project_dir,'combined_centroid.h5'),'centroid_all')
 cent_all = coordinates['centroid_all']
 
 # %% derivative of centroid position
@@ -383,35 +144,6 @@ for t in np.arange(1,len(cent_all)-1):
     S[t] = np.linalg.norm(cent_all[t+1,:]-cent_all[t-1,:])/2
 
 
-# %% load keypoint syllables
-
-model_name = '2026_08_17-15_01_57'
-
-# model_name = '2026_08_19-10_33_58'
-
-results = load_results(project_dir, model_name)
-syllables_org = np.concatenate([results[k]['syllable'] for k in sorted(results.keys())])
-
-# compute_df: get syllable instance frequencies and durations
-
-instances_df = get_syllable_instances(syllables_org, combined_arr, fps=25)
-
-thresh = 0.1
-
-hist, _ = np.histogram(instances_df['syllable'],np.arange(100),density = True )
-
-syllables_raw = syllables_org.copy() 
-for s in np.unique(syllables_org):
-    if hist[s] < 2*1e-3: # 1% frequency threshold, subject to change
-        syllables_raw[np.where(syllables_org == s)] = 99
-
-
-
-comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
-trans_combined = get_transition_matrix(comp_df, normalize='bigram')
-comp_df.to_pickle(os.path.join(project_dir, 'comp_df.pkl'))
-# sns.histplot(data = instances_df['syllable'],stat = 'percent')
-# sns.histplot(data = comp_df['duration_frames'],binwidth = 1)
 
 
 # %% transforming coordinates normalizing pose to center and orientation
@@ -465,6 +197,36 @@ reducer = umap.UMAP(n_neighbors=25,n_components=3,min_dist = 0.1)
 embedding = reducer.fit_transform(T,force_all_finite="allow-nan")
 embedding.shape
 
+
+# %% load keypoint syllables
+
+model_name = '2026_08_17-15_01_57'
+
+# model_name = '2026_08_19-10_33_58'
+
+results = io.load_results(project_dir, model_name)
+syllables_org = np.concatenate([results[k]['syllable'] for k in sorted(results.keys())])
+
+# compute_df: get syllable instance frequencies and durations
+
+instances_df = get_syllable_instances(syllables_org, combined_arr, fps=25)
+
+thresh = 0.1
+
+hist, _ = np.histogram(instances_df['syllable'],np.arange(100),density = True )
+
+syllables_raw = syllables_org.copy() 
+for s in np.unique(syllables_org):
+    if hist[s] < 2*1e-3: # 1% frequency threshold, subject to change
+        syllables_raw[np.where(syllables_org == s)] = 99
+
+
+
+comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
+trans_combined = transitions.get_transition_matrix(comp_df, normalize='bigram')
+# comp_df.to_pickle(os.path.join(project_dir, 'comp_df.pkl'))
+# sns.histplot(data = instances_df['syllable'],stat = 'percent')
+# sns.histplot(data = comp_df['duration_frames'],binwidth = 1)
 
 
 # %%
@@ -562,232 +324,116 @@ ax.set_ylabel(dim2)
 plt.tight_layout()
 plt.show()
 
+# %% Additional analyses start here
+
+import marmo.dispersion as dis
+import marmo.posture as ps
+import marmo.clustering as mcl
+
+# d = comp_df[~comp_df.syllable.isin((99, 199))]
+# order = d.groupby('syllable').duration_frames.median().sort_values().index
+
+# fig, ax = plt.subplots(figsize=(12, 5))
+# ax.boxplot([d.loc[d.syllable == s, 'duration_frames'] for s in order],
+#            labels=[str(s) for s in order], showfliers=False)
+# ax.set_xlabel('syllable'); ax.set_ylabel('duration (frames)')
+# ax.set_title('Syllable duration, ordered by median')
+# plt.tight_layout()
+
+
+
+res = dis.keypoint_dispersion(combined_arr, comp_df, bodyparts_real, exclude_syllables=(99,15))
+dis.plot_keypoint_dispersion(res,font_size_multiplier=1.5)
+#
+# print(res['summary'].to_string())
+# print(res['ego'].round(3).to_string())
+#
+# # fair cross-syllable comparison: fixed 25-frame window from onset
+res_w = dis.keypoint_dispersion(combined_arr, comp_df, bodyparts_real,
+                            window_frames=5, exclude_syllables=(99,15))
+
+dis.plot_keypoint_dispersion(res_w,font_size_multiplier=1.5)
+
+
+ang = ps.frame_angles(combined_arr)
+I   = ps.instance_posture(combined_arr, comp_df, ang)
+STATIONARY = [0,1,2,5,9,10,11,12,14,16,17,24,25,26]
+# A. per-syllable bimodality
+tr = ps.find_syllable_troughs(I, syllables=STATIONARY, min_inst=20)
+ps.plot_syllable_troughs(I, tr)
+#
+# ps.plot_by_syllable(I,'flexion', syllables = STATIONARY)
+
+
+
+
+
+# %%
+feats = mcl.instance_pose_features(combined_arr, comp_df, STATIONARY)
+emb   = mcl.fit_umap(feats, n_components=3,n_neighbors= 25)
+cl, ct, Zi = mcl.cluster_instances(feats, k=6)
+#
+# mcl.plot_umap_projections(emb, feats)
+mcl.plot_umap_projections(emb, feats, labels=cl, label_name='cluster')
+mcl.plot_umap_3d(emb, feats, labels=cl, label_name='cluster')
+
+
+comp_df_post = mcl.relabel_from_clusters(comp_df, feats, cl, stationary=STATIONARY,
+                                     n_frames=len(combined_arr))
+# save_comp_df_post(comp_df_post, os.path.join(project_dir,'comp_df_post.csv'))
+
+
+ang = ps.frame_angles(combined_arr)
+I   = ps.instance_posture(combined_arr, comp_df_post, ang)
+# STATIONARY = [0,1,2,5,9,10,11,12,14,16,17,23,24,25,26]
+# A. per-syllable bimodality
+tr = ps.find_syllable_troughs(I, syllables=[101,102,103,104,105,106], min_inst=20)
+ps.plot_syllable_troughs(I, tr)
+#
+
+# comp_df_post.to_csv(os.path.join(project_dir, 'comp_df_post_2.csv'), index=False)
+
+
 
 # %%
 # =============================================================================
-# 4D syllable centroids: UMAP (x,y,z) + normalized velocity
+# Usage -- drop-in for the Figure 1 section of analysis_postproc.py
 # =============================================================================
-
-from scipy.spatial.distance import cdist, squareform
-from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list
-import matplotlib.gridspec as gridspec
-
-# --- Exclude syllable 99 (low-frequency catch-all) ---
-syll_include = sorted([s for s in np.unique(syllables_valid) if s != 99])
-n_syl        = len(syll_include)
-syl_labels   = [str(s) for s in syll_include]
-
-# Color map: consistent color per syllable across all plots
-syl_colors = {s: cc.glasbey[i] for i, s in enumerate(syll_include)}
-
-# --- Extract velocity for valid frames (last column of T) ---
-velocity_valid = T[valid_mask, -1].reshape(-1, 1)
-v_min, v_max   = np.nanmin(velocity_valid), np.nanmax(velocity_valid)
-velocity_norm  = (velocity_valid - v_min) / (v_max - v_min + 1e-8)
-
-# --- Build 4D embedding: (n_valid_frames, 4) ---
-embedding_4d = np.concatenate([embedding_valid, velocity_norm * 2], axis=1)
-
-# --- Per-syllable centroids and spread ---
-syllable_centroids = {}
-syllable_spread    = {}
-
-for syl in syll_include:
-    mask = syllables_valid == syl
-    if mask.sum() == 0:
-        continue
-    pts = embedding_4d[mask]
-    syllable_centroids[syl] = np.nanmean(pts, axis=0)  # (4,)
-    syllable_spread[syl]    = np.nanstd(pts,  axis=0)  # (4,)
-
-centroid_matrix = np.stack([syllable_centroids[s] for s in syll_include], axis=0)
-centroid_dist   = cdist(centroid_matrix, centroid_matrix, metric='euclidean')
-
-# --- Hierarchical clustering ---
-Z              = linkage(squareform(centroid_dist, checks=False), method='ward')
-ordered_leaves = leaves_list(Z)
-labels_ordered = [syl_labels[i] for i in ordered_leaves]
-dist_reordered = centroid_dist[np.ix_(ordered_leaves, ordered_leaves)]
-syll_ordered   = [syll_include[i] for i in ordered_leaves]
-
-# --- Real syllable instance frequency from comp_df (excludes 99) ---
-freq_counts  = comp_df[comp_df['syllable'] != 99]['syllable'].value_counts()
-freq_total   = freq_counts.sum()
-freq_dict    = {s: freq_counts.get(s, 0) / freq_total for s in syll_include}
-
-# --- Transition matrix from comp_df ---
-N_STATES = 100
-
-def get_transition_matrix(inst_df, n_states=N_STATES, normalize='bigram'):
-    syl       = inst_df['syllable'].values
-    trans_mat = np.zeros((n_states, n_states), dtype=float)
-    np.add.at(trans_mat, (syl[:-1], syl[1:]), 1)
-    if normalize == 'bigram':
-        total = trans_mat.sum()
-        if total > 0:
-            trans_mat /= total
-    elif normalize == 'rows':
-        row_sums = trans_mat.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1
-        trans_mat /= row_sums
-    return trans_mat
-
-trans_combined = get_transition_matrix(comp_df[comp_df['syllable'] != 99], normalize='bigram')
-
-# Subset transition matrix to syll_include only
-syl_idx        = np.array(syll_include)
-trans_sub      = trans_combined[np.ix_(syl_idx, syl_idx)]
-trans_reordered = trans_sub[np.ix_(ordered_leaves, ordered_leaves)]
-
-# # Per-session transition matrices
-# trans_per_session = {}
-# for i, entry in enumerate(index):
-#     sess_start = entry['track1']['start']
-#     sess_end   = entry['track2']['end']
-#     sess_df    = comp_df[
-#         (comp_df['start_frame'] >= sess_start) &
-#         (comp_df['start_frame'] <= sess_end)  &
-#         (comp_df['syllable']    != 99)
-#     ].reset_index(drop=True)
-#     trans_per_session[f'session{i}'] = get_transition_matrix(sess_df, normalize='bigram')
-#     print(f"session{i}: {len(sess_df)} instances")
-
-# Cluster transition matrix independently
-# Use row+col profiles as fingerprint for each syllable
-trans_sym      = (trans_sub + trans_sub.T) / 2
-Z_trans        = linkage(squareform(cdist(trans_sym, trans_sym, metric='euclidean'), 
-                                    checks=False), method='ward')
-ordered_leaves2 = leaves_list(Z_trans)
-labels_ordered2 = [syl_labels[i] for i in ordered_leaves2]
-trans_reordered2 = trans_sub[np.ix_(ordered_leaves2, ordered_leaves2)]
-
-# %%
-# =============================================================================
-# Figure 1: Dendrogram + Spread + Distance heatmap + Transition heatmap
-# =============================================================================
-
-fig1 = plt.figure(figsize=(24, 14))
-fig1.suptitle('Syllable similarity analysis (4D: UMAP + velocity)', fontsize=13)
-
-gs1 = gridspec.GridSpec(2, 3, figure=fig1,
-                         width_ratios=[2.5, 2.5, 1.5],
-                         height_ratios=[1, 2],
-                         hspace=0.35, wspace=0.4)
-
-# Row 0, Col 0: Dendrogram (unchanged)
-ax_dend = fig1.add_subplot(gs1[0, 0])
-dendrogram(
-    Z,
-    labels=syl_labels,
-    ax=ax_dend,
-    color_threshold=0.7 * max(Z[:, 2]),
-    leaf_font_size=9,
-    above_threshold_color='grey'
-)
-ax_dend.set_title('Hierarchical clustering (Ward)', fontsize=10)
-ax_dend.set_ylabel('Distance', fontsize=9)
-ax_dend.set_xlabel('Syllable', fontsize=9)
-ax_dend.spines['top'].set_visible(False)
-ax_dend.spines['right'].set_visible(False)
- 
-# --- Row 0, Col 1-2: Syllable frequency bar chart ---
-ax_freq = fig1.add_subplot(gs1[0, 1:])
-freq_vals    = [freq_dict[s] for s in syll_include]
-freq_colors  = [syl_colors[s] for s in syll_include]
-ax_freq.bar(range(n_syl), freq_vals, color=freq_colors, edgecolor='none')
-ax_freq.set_xticks(range(n_syl))
-ax_freq.set_xticklabels(syl_labels, fontsize=8, rotation=90)
-ax_freq.set_ylabel('Instance frequency', fontsize=9)
-ax_freq.set_title('Syllable frequency (instance-based, excl. 99)', fontsize=10)
-ax_freq.spines['top'].set_visible(False)
-ax_freq.spines['right'].set_visible(False)
-
-# Row 1, Col 0: Distance heatmap — reordered by centroid clustering
-ax_heat = fig1.add_subplot(gs1[1, 0])
-im_heat = ax_heat.imshow(dist_reordered, aspect='equal', cmap='viridis_r')
-ax_heat.set_xticks(range(n_syl))
-ax_heat.set_xticklabels(labels_ordered, fontsize=7, rotation=90)
-ax_heat.set_yticks(range(n_syl))
-ax_heat.set_yticklabels(labels_ordered, fontsize=7)
-ax_heat.set_title('Centroid distance\n(ordered by centroid clustering)', fontsize=10)
-plt.colorbar(im_heat, ax=ax_heat, fraction=0.046, pad=0.04)
-
-# Row 1, Col 1: Transition heatmap — reordered by transition clustering
-ax_trans = fig1.add_subplot(gs1[1, 1])
-im_trans = ax_trans.imshow(trans_reordered2, aspect='equal', cmap='hot_r',
-                            vmin=0, vmax=np.percentile(trans_reordered2[trans_reordered2 > 0], 95))
-ax_trans.set_xticks(range(n_syl))
-ax_trans.set_xticklabels(labels_ordered2, fontsize=7, rotation=90)
-ax_trans.set_yticks(range(n_syl))
-ax_trans.set_yticklabels(labels_ordered2, fontsize=7)
-ax_trans.set_title('Transition matrix\n(ordered by transition clustering)', fontsize=10)
-ax_trans.set_xlabel('to', fontsize=8)
-ax_trans.set_ylabel('from', fontsize=8)
-plt.colorbar(im_trans, ax=ax_trans, fraction=0.046, pad=0.04)
-    
-# --- Row 1, Col 2: Cluster spread heatmap ---
-ax_spread = fig1.add_subplot(gs1[1, 2])
-spread_matrix = np.stack([syllable_spread[s] for s in syll_include], axis=0)
-im_spread = ax_spread.imshow(spread_matrix, aspect='auto', cmap='YlOrRd')
-ax_spread.set_xticks(range(4))
-ax_spread.set_xticklabels(['UMAP-x', 'UMAP-y', 'UMAP-z', 'velocity'], fontsize=8, rotation=30)
-ax_spread.set_yticks(range(n_syl))
-ax_spread.set_yticklabels(syl_labels, fontsize=8)
-ax_spread.set_title('Cluster spread (std dev)', fontsize=10)
-plt.colorbar(im_spread, ax=ax_spread, fraction=0.046, pad=0.04)
-
-plt.show()
+from marmo.clustering import fit_umap
+from marmo.transitions import get_transition_matrix
+from marmo.plotfigs import instance_velocity, build_4d_space, syllable_centroids, plot_figure1, plot_transition_graph
 
 
-# %% 
-# =============================================================================
-# Syllable transition graph
-# =============================================================================
 
-EDGE_THRESH  = 0.002
-NODE_SCALING = 2000
-LAYOUT       = 'circular'  # or 'spring'
+SOURCE_DF = comp_df_post         # or comp_df_post
+EXCLUDE   = (99, 199)
+syls      = sorted(s for s in SOURCE_DF.syllable.unique() if s not in EXCLUDE)
 
-# Build graph directly from subsetted transition matrix
-trans_plot = trans_sub * 100
-G          = nx.from_numpy_array(trans_plot)
+feats = mcl.instance_pose_features(combined_arr, SOURCE_DF, syls)
+vel   = instance_velocity(combined_arr, feats['meta'])
 
-# Relabel nodes from 0..n_syl to actual syllable numbers
-mapping = {i: syll_include[i] for i in range(n_syl)}
-G       = nx.relabel_nodes(G, mapping)
+# feats = mcl.instance_pose_features(combined_arr, comp_df, STATIONARY)
+emb   = mcl.fit_umap(feats, n_components=3)
+# cl, ct, Zi = mcl.cluster_instances(feats, k=4)
+#
+mcl.plot_umap_projections(emb, feats)
 
-# Remove weak edges
-weak_edges = [(u, v) for u, v, d in G.edges(data=True) if d['weight'] < EDGE_THRESH * 100]
-G.remove_edges_from(weak_edges)
 
-# Layout
-pos = nx.circular_layout(G) if LAYOUT == 'circular' else nx.spring_layout(G, seed=42)
+emb4d, emb3 = build_4d_space(feats['X'], vel, n_neighbors=15)
+syl_include, C, S = syllable_centroids(emb4d, feats['labels'], min_inst=3)
 
-# Node sizes proportional to frequency
-node_sizes = [freq_dict[s] * NODE_SCALING + 1000 for s in G.nodes()]
+trans = get_transition_matrix(SOURCE_DF[~SOURCE_DF.syllable.isin(EXCLUDE)],
+                              normalize='enrichment',min_count = 5, drop_self = True)
+fig, Z, D = plot_figure1(syl_include, C, S, feats['labels'], trans)
 
-widths = nx.get_edge_attributes(G, 'weight')
+# pose only, no velocity dimension:
+#   emb4d, emb3 = build_4d_space(feats['X'], np.zeros(len(feats['X'])),
+#                                velocity_weight=0.0)
 
-fig_graph, ax_graph = plt.subplots(figsize=(12, 12))
-ax_graph.axis('off')
-ax_graph.set_title('Syllable transition graph', fontsize=11)
 
-nx.draw_networkx_nodes(G, pos, ax=ax_graph,
-                       node_size=node_sizes,
-                       node_color='white',
-                       edgecolors='red')
+fig2, G  = plot_transition_graph(syl_include, feats['labels'], trans,top_n = 20)
 
-nx.draw_networkx_edges(G, pos, ax=ax_graph,
-                       edgelist=widths.keys(),
-                       width=list(widths.values()),
-                       edge_color='black',
-                       alpha=0.6)
 
-nx.draw_networkx_labels(G, pos, ax=ax_graph,
-                        font_color='black', font_size=9)
-
-plt.tight_layout()
-plt.show()
 # %%
 # =============================================================================
 # Syllable context sequences
@@ -978,7 +624,7 @@ def plot_context_sequences(comp_df, targets=(3, 6), n=2, top_k=10,
 # =============================================================================
 # Usage
 # =============================================================================
-ctx = plot_context_sequences(comp_df, targets=(3,4), n=2, top_k=10)
+ctx = plot_context_sequences(comp_df_post, targets=(3,4), n=2, top_k=10)
 
 9# ranked by enrichment rather than raw count
 df = ctx[(3, 'before')]
@@ -1295,7 +941,7 @@ plt.show()
 
 
 # np.save('/home/jlee629/kpmoseq/projects/feb_may/combined_eg.npy',combined_arr[0:50000,:,:],allow_pickle = True)
-comp_df.to_csv(os.path.join(project_dir, 'comp_df_v2.csv'), index=False)
+# comp_df.to_csv(os.path.join(project_dir, 'comp_df_v2.csv'), index=False)
 
 
 # %% posture angle testing (temp code)
@@ -1361,3 +1007,179 @@ for ax in axes.ravel()[len(order):]:
     ax.set_axis_off()
 fig.supxlabel('trunk elevation (deg)')
 fig.tight_layout()
+
+
+# # %% # %%
+# # =============================================================================
+# # 4D syllable centroids: UMAP (x,y,z) + normalized velocity
+# # =============================================================================
+
+# from scipy.spatial.distance import cdist, squareform
+# from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list
+# import matplotlib.gridspec as gridspec
+
+# # --- Exclude syllable 99 (low-frequency catch-all) ---
+# syll_include = sorted([s for s in np.unique(syllables_valid) if s != 99])
+# n_syl        = len(syll_include)
+# syl_labels   = [str(s) for s in syll_include]
+
+# # Color map: consistent color per syllable across all plots
+# syl_colors = {s: cc.glasbey[i] for i, s in enumerate(syll_include)}
+
+# # --- Extract velocity for valid frames (last column of T) ---
+# velocity_valid = T[valid_mask, -1].reshape(-1, 1)
+# v_min, v_max   = np.nanmin(velocity_valid), np.nanmax(velocity_valid)
+# velocity_norm  = (velocity_valid - v_min) / (v_max - v_min + 1e-8)
+
+# # --- Build 4D embedding: (n_valid_frames, 4) ---
+# embedding_4d = np.concatenate([embedding_valid, velocity_norm * 2], axis=1)
+
+# # --- Per-syllable centroids and spread ---
+# syllable_centroids = {}
+# syllable_spread    = {}
+
+# for syl in syll_include:
+#     mask = syllables_valid == syl
+#     if mask.sum() == 0:
+#         continue
+#     pts = embedding_4d[mask]
+#     syllable_centroids[syl] = np.nanmean(pts, axis=0)  # (4,)
+#     syllable_spread[syl]    = np.nanstd(pts,  axis=0)  # (4,)
+
+# centroid_matrix = np.stack([syllable_centroids[s] for s in syll_include], axis=0)
+# centroid_dist   = cdist(centroid_matrix, centroid_matrix, metric='euclidean')
+
+# # --- Hierarchical clustering ---
+# Z              = linkage(squareform(centroid_dist, checks=False), method='ward')
+# ordered_leaves = leaves_list(Z)
+# labels_ordered = [syl_labels[i] for i in ordered_leaves]
+# dist_reordered = centroid_dist[np.ix_(ordered_leaves, ordered_leaves)]
+# syll_ordered   = [syll_include[i] for i in ordered_leaves]
+
+# # --- Real syllable instance frequency from comp_df (excludes 99) ---
+# freq_counts  = comp_df[comp_df['syllable'] != 99]['syllable'].value_counts()
+# freq_total   = freq_counts.sum()
+# freq_dict    = {s: freq_counts.get(s, 0) / freq_total for s in syll_include}
+
+# # --- Transition matrix from comp_df ---
+# N_STATES = 100
+
+# def get_transition_matrix(inst_df, n_states=N_STATES, normalize='bigram'):
+#     syl       = inst_df['syllable'].values
+#     trans_mat = np.zeros((n_states, n_states), dtype=float)
+#     np.add.at(trans_mat, (syl[:-1], syl[1:]), 1)
+#     if normalize == 'bigram':
+#         total = trans_mat.sum()
+#         if total > 0:
+#             trans_mat /= total
+#     elif normalize == 'rows':
+#         row_sums = trans_mat.sum(axis=1, keepdims=True)
+#         row_sums[row_sums == 0] = 1
+#         trans_mat /= row_sums
+#     return trans_mat
+
+# trans_combined = get_transition_matrix(comp_df[comp_df['syllable'] != 99], normalize='bigram')
+
+# # Subset transition matrix to syll_include only
+# syl_idx        = np.array(syll_include)
+# trans_sub      = trans_combined[np.ix_(syl_idx, syl_idx)]
+# trans_reordered = trans_sub[np.ix_(ordered_leaves, ordered_leaves)]
+
+# # # Per-session transition matrices
+# # trans_per_session = {}
+# # for i, entry in enumerate(index):
+# #     sess_start = entry['track1']['start']
+# #     sess_end   = entry['track2']['end']
+# #     sess_df    = comp_df[
+# #         (comp_df['start_frame'] >= sess_start) &
+# #         (comp_df['start_frame'] <= sess_end)  &
+# #         (comp_df['syllable']    != 99)
+# #     ].reset_index(drop=True)
+# #     trans_per_session[f'session{i}'] = get_transition_matrix(sess_df, normalize='bigram')
+# #     print(f"session{i}: {len(sess_df)} instances")
+
+# # Cluster transition matrix independently
+# # Use row+col profiles as fingerprint for each syllable
+# trans_sym      = (trans_sub + trans_sub.T) / 2
+# Z_trans        = linkage(squareform(cdist(trans_sym, trans_sym, metric='euclidean'), 
+#                                     checks=False), method='ward')
+# ordered_leaves2 = leaves_list(Z_trans)
+# labels_ordered2 = [syl_labels[i] for i in ordered_leaves2]
+# trans_reordered2 = trans_sub[np.ix_(ordered_leaves2, ordered_leaves2)]
+
+# # %%
+# # =============================================================================
+# # Figure 1: Dendrogram + Spread + Distance heatmap + Transition heatmap
+# # =============================================================================
+
+# fig1 = plt.figure(figsize=(24, 14))
+# fig1.suptitle('Syllable similarity analysis (4D: UMAP + velocity)', fontsize=13)
+
+# gs1 = gridspec.GridSpec(2, 3, figure=fig1,
+#                          width_ratios=[2.5, 2.5, 1.5],
+#                          height_ratios=[1, 2],
+#                          hspace=0.35, wspace=0.4)
+
+# # Row 0, Col 0: Dendrogram (unchanged)
+# ax_dend = fig1.add_subplot(gs1[0, 0])
+# dendrogram(
+#     Z,
+#     labels=syl_labels,
+#     ax=ax_dend,
+#     color_threshold=0.7 * max(Z[:, 2]),
+#     leaf_font_size=9,
+#     above_threshold_color='grey'
+# )
+# ax_dend.set_title('Hierarchical clustering (Ward)', fontsize=10)
+# ax_dend.set_ylabel('Distance', fontsize=9)
+# ax_dend.set_xlabel('Syllable', fontsize=9)
+# ax_dend.spines['top'].set_visible(False)
+# ax_dend.spines['right'].set_visible(False)
+ 
+# # --- Row 0, Col 1-2: Syllable frequency bar chart ---
+# ax_freq = fig1.add_subplot(gs1[0, 1:])
+# freq_vals    = [freq_dict[s] for s in syll_include]
+# freq_colors  = [syl_colors[s] for s in syll_include]
+# ax_freq.bar(range(n_syl), freq_vals, color=freq_colors, edgecolor='none')
+# ax_freq.set_xticks(range(n_syl))
+# ax_freq.set_xticklabels(syl_labels, fontsize=8, rotation=90)
+# ax_freq.set_ylabel('Instance frequency', fontsize=9)
+# ax_freq.set_title('Syllable frequency (instance-based, excl. 99)', fontsize=10)
+# ax_freq.spines['top'].set_visible(False)
+# ax_freq.spines['right'].set_visible(False)
+
+# # Row 1, Col 0: Distance heatmap — reordered by centroid clustering
+# ax_heat = fig1.add_subplot(gs1[1, 0])
+# im_heat = ax_heat.imshow(dist_reordered, aspect='equal', cmap='viridis_r')
+# ax_heat.set_xticks(range(n_syl))
+# ax_heat.set_xticklabels(labels_ordered, fontsize=7, rotation=90)
+# ax_heat.set_yticks(range(n_syl))
+# ax_heat.set_yticklabels(labels_ordered, fontsize=7)
+# ax_heat.set_title('Centroid distance\n(ordered by centroid clustering)', fontsize=10)
+# plt.colorbar(im_heat, ax=ax_heat, fraction=0.046, pad=0.04)
+
+# # Row 1, Col 1: Transition heatmap — reordered by transition clustering
+# ax_trans = fig1.add_subplot(gs1[1, 1])
+# im_trans = ax_trans.imshow(trans_reordered2, aspect='equal', cmap='hot_r',
+#                             vmin=0, vmax=np.percentile(trans_reordered2[trans_reordered2 > 0], 95))
+# ax_trans.set_xticks(range(n_syl))
+# ax_trans.set_xticklabels(labels_ordered2, fontsize=7, rotation=90)
+# ax_trans.set_yticks(range(n_syl))
+# ax_trans.set_yticklabels(labels_ordered2, fontsize=7)
+# ax_trans.set_title('Transition matrix\n(ordered by transition clustering)', fontsize=10)
+# ax_trans.set_xlabel('to', fontsize=8)
+# ax_trans.set_ylabel('from', fontsize=8)
+# plt.colorbar(im_trans, ax=ax_trans, fraction=0.046, pad=0.04)
+    
+# # --- Row 1, Col 2: Cluster spread heatmap ---
+# ax_spread = fig1.add_subplot(gs1[1, 2])
+# spread_matrix = np.stack([syllable_spread[s] for s in syll_include], axis=0)
+# im_spread = ax_spread.imshow(spread_matrix, aspect='auto', cmap='YlOrRd')
+# ax_spread.set_xticks(range(4))
+# ax_spread.set_xticklabels(['UMAP-x', 'UMAP-y', 'UMAP-z', 'velocity'], fontsize=8, rotation=30)
+# ax_spread.set_yticks(range(n_syl))
+# ax_spread.set_yticklabels(syl_labels, fontsize=8)
+# ax_spread.set_title('Cluster spread (std dev)', fontsize=10)
+# plt.colorbar(im_spread, ax=ax_spread, fraction=0.046, pad=0.04)
+
+# plt.show()
