@@ -357,7 +357,7 @@ dis.plot_keypoint_dispersion(res_w,font_size_multiplier=1.5)
 
 ang = ps.frame_angles(combined_arr)
 I   = ps.instance_posture(combined_arr, comp_df, ang)
-STATIONARY = [0,1,2,5,9,10,11,12,14,16,17,24,25,26]
+STATIONARY = [0,1,2,5,7,9,10,11,12,14,16,17,24,25,26]
 # A. per-syllable bimodality
 tr = ps.find_syllable_troughs(I, syllables=STATIONARY, min_inst=20)
 ps.plot_syllable_troughs(I, tr)
@@ -399,39 +399,45 @@ ps.plot_syllable_troughs(I, tr)
 # =============================================================================
 # Usage -- drop-in for the Figure 1 section of analysis_postproc.py
 # =============================================================================
-from marmo.clustering import fit_umap
+# from marmo.clustering import fit_umap
+
+ 
 from marmo.transitions import get_transition_matrix
-from marmo.plotfigs import instance_velocity, build_4d_space, syllable_centroids, plot_figure1, plot_transition_graph
-
-
-
-SOURCE_DF = comp_df_post         # or comp_df_post
+from marmo.plotfigs import (instance_velocity, build_4d_space,
+9                            syllable_centroids, plot_figure1,
+                            plot_transition_graph)
+ 
+SOURCE_DF = comp_df_post          # or comp_df
 EXCLUDE   = (99, 199)
+MIN_COUNT = 5                     # cells below this are masked, not zeroed
 syls      = sorted(s for s in SOURCE_DF.syllable.unique() if s not in EXCLUDE)
-
+ 
+# --- instance-median feature space ---
 feats = mcl.instance_pose_features(combined_arr, SOURCE_DF, syls)
-vel   = instance_velocity(combined_arr, feats['meta'])
-
-# feats = mcl.instance_pose_features(combined_arr, comp_df, STATIONARY)
-emb   = mcl.fit_umap(feats, n_components=3)
+# emb   = mcl.fit_umap(feats, n_components=3)
 # cl, ct, Zi = mcl.cluster_instances(feats, k=4)
-#
-mcl.plot_umap_projections(emb, feats)
+# mcl.plot_umap_projections(emb, feats)
 
 
-emb4d, emb3 = build_4d_space(feats['X'], vel, n_neighbors=15)
+vel   = instance_velocity(combined_arr, feats['meta'])
+ 
+emb4d, emb3       = build_4d_space(feats['X'], vel, n_neighbors=15)
 syl_include, C, S = syllable_centroids(emb4d, feats['labels'], min_inst=3)
+ 
+# --- transitions ---
+seq = SOURCE_DF[~SOURCE_DF.syllable.isin(EXCLUDE)]
+ 
+trans_prob = get_transition_matrix(seq, normalize='bigram')
+ 
+trans_enrich = get_transition_matrix(seq, normalize='enrichment',
+                                     min_count=MIN_COUNT, drop_self=True)
+ 
+# --- figures ---
+fig, Z, D = plot_figure1(syl_include, C, S, feats['labels'], trans_prob)
+ 
+fig2, G = plot_transition_graph(syl_include, feats['labels'], trans_prob,
+                                top_n=20)
 
-trans = get_transition_matrix(SOURCE_DF[~SOURCE_DF.syllable.isin(EXCLUDE)],
-                              normalize='enrichment',min_count = 5, drop_self = True)
-fig, Z, D = plot_figure1(syl_include, C, S, feats['labels'], trans)
-
-# pose only, no velocity dimension:
-#   emb4d, emb3 = build_4d_space(feats['X'], np.zeros(len(feats['X'])),
-#                                velocity_weight=0.0)
-
-
-fig2, G  = plot_transition_graph(syl_include, feats['labels'], trans,top_n = 20)
 
 
 # %%
