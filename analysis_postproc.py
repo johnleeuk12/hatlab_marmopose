@@ -15,7 +15,7 @@ import h5py
 import logging
 from pathlib import Path
 import seaborn as sns
-import umap
+# import umap
 import random
 # from statsmodels.multivariate.pca import PCA
 # import keypoint_moseq as kpms
