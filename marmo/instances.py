@@ -7,7 +7,7 @@ import pandas as pd
 
 
 
-def get_syllable_instances(syllables_raw, combined_arr, fps=25, min_duration=2):
+def get_syllable_instances(syllables_raw, combined_arr, fps=25, min_duration=3):
     """
     Segment a frame-level syllable sequence into instances.
 

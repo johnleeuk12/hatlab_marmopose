@@ -41,7 +41,8 @@ import marmo.transitions as transitions
 
 # %% Init
 # project_dir = "/home/jlee629/kpmoseq/projects/feb_may"
-project_dir = 'D:/KeypointMoseq/projects/feb_may'
+# project_dir = 'D:/KeypointMoseq/projects/feb_may'
+project_dir = '/media/jlee629/D/KeypointMoseq/projects/feb_may'
 fname = 'combined.h5'
 
 
@@ -200,7 +201,7 @@ embedding.shape
 
 # %% load keypoint syllables
 
-model_name = '2026_08_17-15_01_57'
+model_name = '2026_09_09-12_29_41'
 
 # model_name = '2026_08_19-10_33_58'
 
@@ -224,7 +225,9 @@ for s in np.unique(syllables_org):
 
 comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
 trans_combined = transitions.get_transition_matrix(comp_df, normalize='bigram')
-# comp_df.to_pickle(os.path.join(project_dir, 'comp_df.pkl'))
+comp_df.to_pickle(os.path.join(project_dir, 'comp_df.pkl'))
+comp_df.to_csv(os.path.join(project_dir, 'comp_df.csv'), index=False)
+
 # sns.histplot(data = instances_df['syllable'],stat = 'percent')
 # sns.histplot(data = comp_df['duration_frames'],binwidth = 1)
 
@@ -342,7 +345,7 @@ import marmo.clustering as mcl
 
 
 
-res = dis.keypoint_dispersion(combined_arr, comp_df, bodyparts_real, exclude_syllables=(99,15))
+res = dis.keypoint_dispersion(combined_arr, comp_df, bodyparts_real, exclude_syllables=(99,12))
 dis.plot_keypoint_dispersion(res,font_size_multiplier=1.5)
 #
 # print(res['summary'].to_string())
@@ -350,14 +353,14 @@ dis.plot_keypoint_dispersion(res,font_size_multiplier=1.5)
 #
 # # fair cross-syllable comparison: fixed 25-frame window from onset
 res_w = dis.keypoint_dispersion(combined_arr, comp_df, bodyparts_real,
-                            window_frames=5, exclude_syllables=(99,15))
+                            window_frames=5, exclude_syllables=(99,12))
 
 dis.plot_keypoint_dispersion(res_w,font_size_multiplier=1.5)
 
 
 ang = ps.frame_angles(combined_arr)
 I   = ps.instance_posture(combined_arr, comp_df, ang)
-STATIONARY = [0,1,2,5,7,9,10,11,12,14,16,17,24,25,26]
+STATIONARY = [0,1,2,6,7,8,9,14,15,16,17,18,19,20,21,22,23]
 # A. per-syllable bimodality
 tr = ps.find_syllable_troughs(I, syllables=STATIONARY, min_inst=20)
 ps.plot_syllable_troughs(I, tr)
@@ -374,7 +377,7 @@ emb   = mcl.fit_umap(feats, n_components=3,n_neighbors= 25)
 cl, ct, Zi = mcl.cluster_instances(feats, k=6)
 #
 # mcl.plot_umap_projections(emb, feats)
-mcl.plot_umap_projections(emb, feats, labels=cl, label_name='cluster')
+# mcl.plot_umap_projections(emb, feats, labels=cl, label_name='cluster')
 mcl.plot_umap_3d(emb, feats, labels=cl, label_name='cluster')
 
 
@@ -404,7 +407,7 @@ ps.plot_syllable_troughs(I, tr)
  
 from marmo.transitions import get_transition_matrix
 from marmo.plotfigs import (instance_velocity, build_4d_space,
-9                            syllable_centroids, plot_figure1,
+                            syllable_centroids, plot_figure1,
                             plot_transition_graph)
  
 SOURCE_DF = comp_df_post          # or comp_df

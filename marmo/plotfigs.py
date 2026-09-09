@@ -111,7 +111,7 @@ def syllable_centroids(emb4d, labels, min_inst=3, robust=True, verbose=True):
 
 
 def plot_figure1(syl_include, C, S, labels, trans_matrix,
-                 spread_label='MAD', figsize=(23, 13)):
+                 spread_label='MAD', trans_order='own', figsize=(22, 13)):
     """
     trans_matrix : DataFrame from get_transition_matrix, indexed by label. Only
                    the rows/columns in syl_include are used, so a matrix built
@@ -120,11 +120,27 @@ def plot_figure1(syl_include, C, S, labels, trans_matrix,
     Dendrogram, instance-frequency bar, centroid-distance heatmap, transition
     heatmap, spread heatmap.
  
-    The two heatmaps are ordered by their OWN clustering, not a shared one:
-    the distance heatmap follows the centroid tree, the transition heatmap
-    follows a tree built on transition profiles. Comparing the two orderings is
-    the point -- postural similarity and transition similarity are different
-    things, and forcing one order onto both hides that.
+    trans_order : leaf order for the transition heatmap.
+                  'own'      a tree built on transition profiles
+                  'centroid' the same order as the centroid distance heatmap
+
+                  The two answer different questions. 'own' shows how
+                  transitions group syllables on their own terms, so postural
+                  and transition similarity appear as two independent
+                  groupings. 'centroid' aligns the matrices cell for cell,
+                  which is the only way to see whether a block in one
+                  corresponds to a block in the other -- in 'own' order they
+                  are not cell-comparable.
+
+    trans_matrix accepts any normalisation; the panel adapts to
+    .attrs['normalize']. enrichment and pmi are ratios centred on chance, so
+    they get a diverging colormap centred at 1 and 0 respectively, while
+    probabilities get a sequential one from 0. NaN cells from min_count masking
+    are drawn grey.
+
+    Colour limits come from the whole matrix rather than the reordered view, so
+    both orderings share an identical scale. Both heatmaps use aspect='equal'
+    with equal-width columns, so they render at the same size.
     """
     n = len(syl_include)
     lab = [str(s) for s in syl_include]
@@ -135,8 +151,16 @@ def plot_figure1(syl_include, C, S, labels, trans_matrix,
  
     # trans_matrix is a DataFrame indexed by label; restrict to the syllables
     # that survived min_inst, then work with the values
-    T_sub = trans_matrix.loc[syl_include, syl_include].values
-    Tsym = (T_sub + T_sub.T) / 2
+    T_sub = trans_matrix.loc[syl_include, syl_include].to_numpy(copy=True)
+    norm = trans_matrix.attrs.get('normalize', 'bigram')
+
+    # neutral = "no information": chance level for a ratio, zero for a
+    # probability. Substituted only so the ordering tree is computable -- cdist
+    # propagates NaN and squareform rejects it, and with min_count=5 on this
+    # data 299 of 441 cells are masked.
+    neutral = {'enrichment': 1.0, 'pmi': 0.0}.get(norm, 0.0)
+    T_tree = np.where(np.isfinite(T_sub), T_sub, neutral)
+    Tsym = (T_tree + T_tree.T) / 2
     Z2 = linkage(squareform(cdist(Tsym, Tsym), checks=False), method='ward')
     o2 = leaves_list(Z2)
  
@@ -147,7 +171,7 @@ def plot_figure1(syl_include, C, S, labels, trans_matrix,
     fig = plt.figure(figsize=figsize)
     fig.suptitle('Syllable structure from INSTANCE MEDIANS '
                  '(4D: UMAP + velocity)', fontsize=13)
-    gs = gridspec.GridSpec(2, 3, figure=fig, width_ratios=[2.2, 1.6, 1.3],
+    gs = gridspec.GridSpec(2, 3, figure=fig, width_ratios=[1.5, 1.5, 1.0],
                            height_ratios=[1, 2], hspace=.35, wspace=.35)
  
     ax = fig.add_subplot(gs[0, 0])
@@ -176,13 +200,40 @@ def plot_figure1(syl_include, C, S, labels, trans_matrix,
     ax.set_title('Centroid distance\n(ordered by centroid tree)', fontsize=10)
     plt.colorbar(im, ax=ax, fraction=.046, pad=.04)
  
+    orders = {'own': o2, 'centroid': o1}
+    if trans_order not in orders:
+        raise ValueError("trans_order must be 'own' or 'centroid'")
+    o_tr = orders[trans_order]
+
     ax = fig.add_subplot(gs[1, 1])
-    Tr = T_sub[np.ix_(o2, o2)]
-    im = ax.imshow(Tr, cmap='hot_r', aspect='equal',
-                   vmin=0, vmax=np.percentile(Tr[Tr > 0], 95) if (Tr > 0).any() else 1)
-    ax.set_xticks(range(n)); ax.set_xticklabels([lab[i] for i in o2], fontsize=7, rotation=90)
-    ax.set_yticks(range(n)); ax.set_yticklabels([lab[i] for i in o2], fontsize=7)
-    ax.set_title('Transition matrix (bigram)\n(ordered by transition tree)', fontsize=10)
+    Tr = T_sub[np.ix_(o_tr, o_tr)]
+    fin = T_sub[np.isfinite(T_sub)]     # whole matrix, so the colour scale is
+                                        # the same whichever order is chosen
+
+    if norm in ('enrichment', 'pmi') and len(fin):
+        # diverging, centred on chance, equal reach either side so that "twice
+        # as often" and "half as often" are equally visible
+        if norm == 'pmi':
+            r = np.nanpercentile(np.abs(fin), 98) or 1.0
+            kw = dict(cmap='RdBu_r', vmin=-r, vmax=r)
+        else:
+            r = max(np.nanpercentile(fin, 98), 1.0)
+            kw = dict(cmap='RdBu_r', vmin=2.0 - r, vmax=r)
+    else:
+        hi = np.percentile(fin[fin > 0], 95) if (fin > 0).any() else 1.0
+        kw = dict(cmap='hot_r', vmin=0, vmax=hi)
+
+    cmap = plt.get_cmap(kw.pop('cmap')).copy()
+    cmap.set_bad('0.85')                # masked cells read as grey, so "too
+                                        # rare to judge" is not "never happens"
+    im = ax.imshow(np.ma.masked_invalid(Tr), cmap=cmap, aspect='equal', **kw)
+    ax.set_xticks(range(n)); ax.set_xticklabels([lab[i] for i in o_tr], fontsize=7, rotation=90)
+    ax.set_yticks(range(n)); ax.set_yticklabels([lab[i] for i in o_tr], fontsize=7)
+    mc = trans_matrix.attrs.get('min_count', 0)
+    extra = f', grey = n<{mc}' if mc else ''
+    which = {'own': 'ordered by transition tree',
+             'centroid': 'ordered by centroid tree'}[trans_order]
+    ax.set_title(f'Transition matrix ({norm}){extra}\n({which})', fontsize=10)
     ax.set_xlabel('to', fontsize=8); ax.set_ylabel('from', fontsize=8)
     plt.colorbar(im, ax=ax, fraction=.046, pad=.04)
  
