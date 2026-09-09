@@ -414,9 +414,9 @@ SOURCE_DF = comp_df_post          # or comp_df
 EXCLUDE   = (99, 199)
 MIN_COUNT = 5                     # cells below this are masked, not zeroed
 syls      = sorted(s for s in SOURCE_DF.syllable.unique() if s not in EXCLUDE)
- 
+NO_EXTREM = ('tailmid', 'tailend', 'lefthand', 'righthand', 'leftfoot', 'rightfoot')
 # --- instance-median feature space ---
-feats = mcl.instance_pose_features(combined_arr, SOURCE_DF, syls)
+feats = mcl.instance_pose_features(combined_arr, SOURCE_DF, syls,use_quality_filter=False)
 # emb   = mcl.fit_umap(feats, n_components=3)
 # cl, ct, Zi = mcl.cluster_instances(feats, k=4)
 # mcl.plot_umap_projections(emb, feats)
@@ -439,9 +439,70 @@ trans_enrich = get_transition_matrix(seq, normalize='enrichment',
 fig, Z, D = plot_figure1(syl_include, C, S, feats['labels'], trans_prob)
  
 fig2, G = plot_transition_graph(syl_include, feats['labels'], trans_prob,
-                                top_n=20)
+                                top_n=50)
 
+# %%
 
+from marmo.geometry import ego_frame, segment_quality
+from marmo.config import TAIL, SPINE, MIN_FRAMES, TRUNK_THR
+ 
+ 
+def why_dropped(pts, comp_df, syllables,
+                min_frames=MIN_FRAMES, trunk_thr=TRUNK_THR,
+                use_quality_filter=True):
+    """
+    Per-syllable instance counts surviving each stage.
+ 
+    Columns
+    -------
+    n_total     instances with this label in comp_df
+    in_range    ...ending inside the array (only bites if pts is an excerpt)
+    ego_ok      ...with at least min_frames where the egocentric frame exists,
+                i.e. tailbase/spinemid/neck present
+    qual_ok     ...also passing the trunk-length quality filter
+    lost_to     the stage that removed the rest
+ 
+    A syllable reaching qual_ok = 0 is absent from feats['labels'].
+    """
+    T = len(pts)
+    ego = ego_frame(pts)
+    ok_ego = np.isfinite(ego[:, SPINE, 0])
+    if use_quality_filter:
+        ok_qual = ok_ego & (segment_quality(pts, TAIL, SPINE) < trunk_thr)
+    else:
+        ok_qual = ok_ego
+    rows = []
+    for s in sorted(syllables):
+        g = comp_df[comp_df.syllable == s]
+        gi = g[(g.start_frame + g.duration_frames) <= T]
+        n_ego = n_qual = 0
+        for r in gi.itertuples(index=False):
+            sl = slice(r.start_frame, r.start_frame + r.duration_frames)
+            if ok_ego[sl].sum() >= min_frames:
+                n_ego += 1
+            if ok_qual[sl].sum() >= min_frames:
+                n_qual += 1
+        lost = ('-' if n_qual else
+                'out of range' if len(gi) == 0 else
+                'no egocentric frame' if n_ego == 0 else
+                'quality filter')
+        rows.append({'syllable': s, 'n_total': len(g), 'in_range': len(gi),
+                     'ego_ok': n_ego, 'qual_ok': n_qual,
+                     'dur_med': g.duration_frames.median(), 'lost_to': lost})
+    t = pd.DataFrame(rows).set_index('syllable')
+    dropped = t.index[t.qual_ok == 0].tolist()
+    print(t.to_string())
+    print(f'\nabsent from feats: {dropped}')
+    if dropped:
+        print('  median duration of dropped syllables: '
+              f'{t.loc[dropped, "dur_med"].median():.0f} frames  '
+              f'(kept: {t.loc[t.qual_ok > 0, "dur_med"].median():.0f})')
+        print('  short syllables fail most easily: min_frames is an ABSOLUTE count,')
+        print('  so a 4-frame instance needs 3 of 4 frames to pass while a 40-frame')
+        print('  one needs 3 of 40.')
+    return t
+
+why_dropped(combined_arr, comp_df_post, syls)
 
 # %%
 # =============================================================================
@@ -467,9 +528,7 @@ fig2, G = plot_transition_graph(syl_include, feats['labels'], trans_prob,
 #   instance, so no window can contain an immediate self-repeat.
 # =============================================================================
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+
 from collections import Counter
 
 
@@ -576,7 +635,7 @@ def get_context_sequences(comp_df, target, n=2, direction='before',
 
 
 def plot_context_sequences(comp_df, targets=(3, 6), n=2, top_k=10,
-                           exclude=(99,), show_expected=True):
+                           exclude=(99,199), show_expected=True):
     """
     Grid of horizontal histograms: one row per target, columns before / after.
 
@@ -635,7 +694,7 @@ def plot_context_sequences(comp_df, targets=(3, 6), n=2, top_k=10,
 # =============================================================================
 ctx = plot_context_sequences(comp_df_post, targets=(3,4), n=2, top_k=10)
 
-9# ranked by enrichment rather than raw count
+# ranked by enrichment rather than raw count
 df = ctx[(3, 'before')]
 print(df.sort_values('ratio', ascending=False)[
           ['label', 'count', 'expected', 'ratio']].to_string(index=False))
