@@ -27,7 +27,8 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers '3d')
 
 from marmo.config import (TAIL, SPINE, NECK, BODYPARTS,
                           DEFAULT_EXCLUDE_BODYPARTS, TRUNK_THR, MIN_FRAMES)
-from marmo.geometry import ego_frame, body_length, segment_quality
+from marmo.geometry import (ego_frame, yaw_frame, body_length,
+                            segment_quality)
 
 LABEL_OFFSET = 100
 UNASSIGNED   = 199
@@ -41,7 +42,7 @@ def _palette(n):
         return [plt.cm.tab20(i % 20) for i in range(n)]
 
 
-def instance_pose_features(pts, comp_df, syllables,
+def instance_pose_features(pts, comp_df, syllables, frame='body_axis',
                            bodyparts=BODYPARTS,
                            exclude_bodyparts=DEFAULT_EXCLUDE_BODYPARTS,
                            trunk_thr=TRUNK_THR, use_quality_filter=True,
@@ -49,6 +50,18 @@ def instance_pose_features(pts, comp_df, syllables,
                            verbose=True):
     """
     Median egocentric keypoint position per instance, standardised.
+
+    frame : which egocentric convention to use.
+            'body_axis' (default) rotates the body axis onto u, removing yaw and
+                        pitch. Compares pose independent of body orientation, so
+                        an upright and a prone animal in the same pose look
+                        identical. Trunk elevation is recoverable from the
+                        output at only R^2 = 0.60.
+            'yaw_only'  removes heading but keeps the world vertical axis, so
+                        every keypoint's height survives. Elevation recoverable
+                        at R^2 = 0.92 from the same features. Use this when
+                        upright / crouched / lying should come out as different
+                        poses rather than the same pose differently oriented.
 
     syllables : the set to include -- pass your stationary list.
 
@@ -65,7 +78,12 @@ def instance_pose_features(pts, comp_df, syllables,
     """
     q = segment_quality(pts, TAIL, SPINE)
     scale = body_length(pts, TAIL, NECK)
-    ego = ego_frame(pts)          # centroid origin, tailbase->neck axis
+    if frame == 'body_axis':
+        ego = ego_frame(pts)      # centroid origin, tailbase->neck axis
+    elif frame == 'yaw_only':
+        ego = yaw_frame(pts)      # heading removed, world vertical kept
+    else:
+        raise ValueError("frame must be 'body_axis' or 'yaw_only'")
 
     frame_ok = np.isfinite(ego[:, SPINE, 0])
     if use_quality_filter:

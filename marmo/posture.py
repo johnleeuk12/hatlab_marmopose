@@ -269,7 +269,7 @@ def validate_split(sp, verbose=True):
 
 def plot_by_syllable(I, metric='elevation', pooled=False, ncol=5,
                      min_inst=MIN_INSTANCES, drop_transitional=True,
-                     bins=None, syllables=None):
+                     bins=None, syllables=None,bin_color = 'steelblue'):
     """
     Per-instance histograms of elevation or flexion.
  
@@ -300,8 +300,8 @@ def plot_by_syllable(I, metric='elevation', pooled=False, ncol=5,
         bins = np.arange(0, 91, 5) if metric == 'elevation' else np.arange(60, 181, 5)
  
     def panel(ax, v, title):
-        ax.hist(v, bins=bins, color='steelblue', edgecolor='white', linewidth=.3)
-        ax.axvline(np.median(v), color='firebrick', ls='--', lw=1)
+        ax.hist(v, bins=bins, color=bin_color, edgecolor='white', linewidth=.3)
+        ax.axvline(np.median(v), color='firebrick', ls='--', lw=2)
         ax.set_title(title, fontsize=8)
         ax.tick_params(labelsize=7)
  

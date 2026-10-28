@@ -15,13 +15,13 @@ import h5py
 import logging
 from pathlib import Path
 import seaborn as sns
-# import umap
+import umap
 import random
 # from statsmodels.multivariate.pca import PCA
 # import keypoint_moseq as kpms
 from matplotlib.widgets import Slider
 # from mpl_toolkits.mplot3d import Axes3D
-import networkx as nx
+# import networkx as nx
 import datashader as ds
 import datashader.transfer_functions as tf
 import colorcet as cc
@@ -146,6 +146,38 @@ for t in np.arange(1,len(cent_all)-1):
 
 
 
+# %% load keypoint syllables
+
+model_name = '2026_08_17-15_01_57'
+
+# model_name = '2026_08_19-10_33_58'
+
+results = io.load_results(project_dir, model_name)
+syllables_org = np.concatenate([results[k]['syllable'] for k in sorted(results.keys())])
+
+# compute_df: get syllable instance frequencies and durations
+
+instances_df = get_syllable_instances(syllables_org, combined_arr, fps=25)
+
+thresh = 0.1
+
+hist, _ = np.histogram(instances_df['syllable'],np.arange(100),density = True )
+
+syllables_raw = syllables_org.copy() 
+for s in np.unique(syllables_org):
+    if hist[s] < 2*1e-3: # 1% frequency threshold, subject to change
+        syllables_raw[np.where(syllables_org == s)] = 99
+
+
+
+comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
+trans_combined = transitions.get_transition_matrix(comp_df, normalize='bigram')
+comp_df.to_pickle(os.path.join(project_dir, 'comp_df.pkl'))
+comp_df.to_csv(os.path.join(project_dir, 'comp_df.csv'), index=False)
+
+# sns.histplot(data = instances_df['syllable'],stat = 'percent')
+# sns.histplot(data = comp_df['duration_frames'],binwidth = 1)
+
 
 # %% transforming coordinates normalizing pose to center and orientation
 # we take neck and tailbase(sometimes tailbase invisible)
@@ -162,7 +194,7 @@ ani_ind2 = {
     'not-nan': np.where(~nan_mask)[0]
 }
         
-#%%
+# %% start of UMAP per frame (can skip)
 
 
 def transform_coord(data,speed):
@@ -198,38 +230,6 @@ reducer = umap.UMAP(n_neighbors=25,n_components=3,min_dist = 0.1)
 embedding = reducer.fit_transform(T,force_all_finite="allow-nan")
 embedding.shape
 
-
-# %% load keypoint syllables
-
-model_name = '2026_09_09-12_29_41'
-
-# model_name = '2026_08_19-10_33_58'
-
-results = io.load_results(project_dir, model_name)
-syllables_org = np.concatenate([results[k]['syllable'] for k in sorted(results.keys())])
-
-# compute_df: get syllable instance frequencies and durations
-
-instances_df = get_syllable_instances(syllables_org, combined_arr, fps=25)
-
-thresh = 0.1
-
-hist, _ = np.histogram(instances_df['syllable'],np.arange(100),density = True )
-
-syllables_raw = syllables_org.copy() 
-for s in np.unique(syllables_org):
-    if hist[s] < 2*1e-3: # 1% frequency threshold, subject to change
-        syllables_raw[np.where(syllables_org == s)] = 99
-
-
-
-comp_df = get_syllable_instances(syllables_raw, combined_arr, fps=25)
-trans_combined = transitions.get_transition_matrix(comp_df, normalize='bigram')
-comp_df.to_pickle(os.path.join(project_dir, 'comp_df.pkl'))
-comp_df.to_csv(os.path.join(project_dir, 'comp_df.csv'), index=False)
-
-# sns.histplot(data = instances_df['syllable'],stat = 'percent')
-# sns.histplot(data = comp_df['duration_frames'],binwidth = 1)
 
 
 # %%
@@ -345,7 +345,7 @@ import marmo.clustering as mcl
 
 
 
-res = dis.keypoint_dispersion(combined_arr, comp_df, bodyparts_real, exclude_syllables=(99,12))
+res = dis.keypoint_dispersion(combined_arr, comp_df, bodyparts_real, exclude_syllables=(99,7))
 dis.plot_keypoint_dispersion(res,font_size_multiplier=1.5)
 #
 # print(res['summary'].to_string())
@@ -353,14 +353,16 @@ dis.plot_keypoint_dispersion(res,font_size_multiplier=1.5)
 #
 # # fair cross-syllable comparison: fixed 25-frame window from onset
 res_w = dis.keypoint_dispersion(combined_arr, comp_df, bodyparts_real,
-                            window_frames=5, exclude_syllables=(99,12))
+                            window_frames=5, exclude_syllables=(99,7))
 
 dis.plot_keypoint_dispersion(res_w,font_size_multiplier=1.5)
 
-
+# %%
 ang = ps.frame_angles(combined_arr)
 I   = ps.instance_posture(combined_arr, comp_df, ang)
-STATIONARY = [0,1,2,6,7,8,9,14,15,16,17,18,19,20,21,22,23]
+STATIONARY = [0,2,5,8,9,10,11,13,14,16,17,19,20,21,22]
+
+# STATIONARY = [0,2,4,6,7,11,13,14,16]
 # A. per-syllable bimodality
 tr = ps.find_syllable_troughs(I, syllables=STATIONARY, min_inst=20)
 ps.plot_syllable_troughs(I, tr)
@@ -370,14 +372,14 @@ ps.plot_syllable_troughs(I, tr)
 
 
 
-
 # %%
-feats = mcl.instance_pose_features(combined_arr, comp_df, STATIONARY)
+feats = mcl.instance_pose_features(combined_arr, comp_df, STATIONARY,frame = 'yaw_only')
 emb   = mcl.fit_umap(feats, n_components=3,n_neighbors= 25)
 cl, ct, Zi = mcl.cluster_instances(feats, k=6)
 #
+cl2 = cl + 100
 # mcl.plot_umap_projections(emb, feats)
-# mcl.plot_umap_projections(emb, feats, labels=cl, label_name='cluster')
+mcl.plot_umap_projections(emb, feats, labels=cl2, label_name='cluster')
 mcl.plot_umap_3d(emb, feats, labels=cl, label_name='cluster')
 
 
@@ -392,9 +394,12 @@ I   = ps.instance_posture(combined_arr, comp_df_post, ang)
 # A. per-syllable bimodality
 tr = ps.find_syllable_troughs(I, syllables=[101,102,103,104,105,106], min_inst=20)
 ps.plot_syllable_troughs(I, tr)
+
+ps.plot_by_syllable(I,'elevation', syllables = [101,102,103,104,105,106])
+ps.plot_by_syllable(I,'flexion', syllables = [101,102,103,104,105,106],bin_color = 'green')
 #
 
-# comp_df_post.to_csv(os.path.join(project_dir, 'comp_df_post_2.csv'), index=False)
+comp_df_post.to_csv(os.path.join(project_dir, 'comp_df_post_2.csv'), index=False)
 
 
 
@@ -414,9 +419,9 @@ SOURCE_DF = comp_df_post          # or comp_df
 EXCLUDE   = (99, 199)
 MIN_COUNT = 5                     # cells below this are masked, not zeroed
 syls      = sorted(s for s in SOURCE_DF.syllable.unique() if s not in EXCLUDE)
-NO_EXTREM = ('tailmid', 'tailend', 'lefthand', 'righthand', 'leftfoot', 'rightfoot')
+# NO_EXTREM = ('tailmid', 'tailend', 'lefthand', 'righthand', 'leftfoot', 'rightfoot')
 # --- instance-median feature space ---
-feats = mcl.instance_pose_features(combined_arr, SOURCE_DF, syls,use_quality_filter=False)
+feats = mcl.instance_pose_features(combined_arr, SOURCE_DF, syls,use_quality_filter=False,frame = 'yaw_only')
 # emb   = mcl.fit_umap(feats, n_components=3)
 # cl, ct, Zi = mcl.cluster_instances(feats, k=4)
 # mcl.plot_umap_projections(emb, feats)
@@ -692,18 +697,24 @@ def plot_context_sequences(comp_df, targets=(3, 6), n=2, top_k=10,
 # =============================================================================
 # Usage
 # =============================================================================
-ctx = plot_context_sequences(comp_df_post, targets=(3,4), n=2, top_k=10)
+ctx = plot_context_sequences(comp_df_post, targets=(3,6), n=2, top_k=5)
 
 # ranked by enrichment rather than raw count
-df = ctx[(3, 'before')]
+# df = ctx[(3, 'before')]
+
+df = get_context_sequences(comp_df_post, target=3, n=2, direction='before')
+print(df.sort_values('ratio', ascending=False)[
+          ['label', 'count', 'expected', 'ratio']].to_string(index=False))
+
+df = get_context_sequences(comp_df_post, target=3, n=2, direction='after')
 print(df.sort_values('ratio', ascending=False)[
           ['label', 'count', 'expected', 'ratio']].to_string(index=False))
 
 # single direction, longer context
-df = get_context_sequences(comp_df, target=3, n=3, direction='after')
+# df = get_context_sequences(comp_df, target=3, n=3, direction='after')
 
-print(df.sort_values('ratio', ascending=False)[
-          ['label', 'count', 'expected', 'ratio']].to_string(index=False))
+# print(df.sort_values('ratio', ascending=False)[
+#           ['label', 'count', 'expected', 'ratio']].to_string(index=False))
 
 
 
@@ -1008,7 +1019,7 @@ fig.canvas.mpl_connect('close_event', on_close)
 plt.show()
 
 
-# np.save('/home/jlee629/kpmoseq/projects/feb_may/combined_eg.npy',combined_arr[0:50000,:,:],allow_pickle = True)
+# np.save('/home/jlee629/kpmoseq/projects/feb_may2/combined_eg.npy',combined_arr[50000:170000,:,:],allow_pickle = True)
 # comp_df.to_csv(os.path.join(project_dir, 'comp_df_v2.csv'), index=False)
 
 

@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Oct 26 12:40:13 2026
+
+@author: jlee629
+"""
+
+import matplotlib.pyplot as plt
+import numpy as np
+# if not hasattr(np, 'bool8'):
+#     np.bool8 = np.bool_ # Or np.bool
+import os
+
+# %%
+data_dir = '/media/jlee629/D/Neural Data/Phy'
+session_name = 'TS_05_06'
+
+fpath1 = os.path.join(data_dir,session_name)
+
+n_channels = 99      # total channels in the .bin, including analog
+n_samples  = 30000*20
+
+data = np.fromfile(os.path.join(fpath1,'rawdat.bin'), dtype=np.int16,
+                   count=n_samples * n_channels).reshape(n_samples, n_channels).T
+# data.shape == (n_channels, n_samples)
+
+sync = data[96]  
+fig, axes = plt.subplots(1, 1, figsize=(18, 5))
+
+axes.plot(data[96])
+# axes.plot(data[97])
+# axes.plot(data[98])
+
+
+# %%
+
+from neo.rawio import BlackrockRawIO
+
+reader = BlackrockRawIO(filename='datafile')   # no extension — it pairs .nev/.nsX by basename
+reader.parse_header()
+print(reader)     
